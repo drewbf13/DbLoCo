@@ -1,11 +1,11 @@
 # SqlClone v1 (DbLoCo)
 
-SqlClone is a .NET 9 console tool that provisions a local SQL Server Docker container representing a cloned Azure SQL/MI development environment.
+SqlClone is a .NET 10 console tool that provisions a local SQL Server Docker container representing a cloned Azure SQL/MI development environment.
 
 ## Prerequisites
 
 - Windows development machine (first-class target for v1)
-- .NET 9 SDK
+- .NET 10 SDK
 - Docker Desktop with Linux containers enabled
 - Access to a source SQL endpoint for `inspect-source`
 

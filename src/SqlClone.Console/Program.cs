@@ -11,7 +11,10 @@ using SqlClone.Infrastructure;
 
 var builder = Host.CreateApplicationBuilder(args);
 
+var configBasePath = ResolveConfigBasePath();
+
 builder.Configuration
+    .SetBasePath(configBasePath)
     .AddJsonFile("appsettings.json", optional: false, reloadOnChange: true)
     .AddJsonFile($"appsettings.{builder.Environment.EnvironmentName}.json", optional: true, reloadOnChange: true)
     .AddJsonFile("appsettings.Local.json", optional: true, reloadOnChange: true)
@@ -36,7 +39,7 @@ var envOption = new Option<string>("--environment", () => "Development", "Enviro
 var keepVolumeOption = new Option<bool>("--keep-volume", "Keep volume during teardown");
 
 var init = new Command("init", "Create config defaults and verify docker") { envOption };
-init.SetHandler(async (string environment) => await InitAsync(environment, host, CancellationToken.None), envOption);
+init.SetHandler(async (string environment) => await InitAsync(environment, host, configBasePath, CancellationToken.None), envOption);
 
 var inspect = new Command("inspect-source", "Inspect source SQL endpoint");
 inspect.SetHandler(async () =>
@@ -102,9 +105,9 @@ root.Add(teardown);
 
 return await root.InvokeAsync(args);
 
-static async Task InitAsync(string environment, IHost host, CancellationToken cancellationToken)
+static async Task InitAsync(string environment, IHost host, string configBasePath, CancellationToken cancellationToken)
 {
-    var localFile = Path.Combine(Environment.CurrentDirectory, "appsettings.Local.json");
+    var localFile = Path.Combine(configBasePath, "appsettings.Local.json");
     if (!File.Exists(localFile))
     {
         await File.WriteAllTextAsync(localFile, "{}", cancellationToken);
@@ -123,6 +126,28 @@ static async Task InitAsync(string environment, IHost host, CancellationToken ca
     Console.WriteLine($"- Clone:Docker:SaPassword (current length: {options.Docker.SaPassword.Length})");
 }
 
+
+static string ResolveConfigBasePath()
+{
+    var current = Environment.CurrentDirectory;
+    if (File.Exists(Path.Combine(current, "appsettings.json")))
+    {
+        return current;
+    }
+
+    var projectPath = Path.Combine(current, "src", "SqlClone.Console");
+    if (File.Exists(Path.Combine(projectPath, "appsettings.json")))
+    {
+        return projectPath;
+    }
+
+    if (File.Exists(Path.Combine(AppContext.BaseDirectory, "appsettings.json")))
+    {
+        return AppContext.BaseDirectory;
+    }
+
+    throw new FileNotFoundException("Could not locate appsettings.json in current directory, src/SqlClone.Console, or application base directory.");
+}
 static async Task<(int exitCode, string stdOut, string stdErr)> RunProcessAsync(string fileName, string arguments, CancellationToken cancellationToken)
 {
     var startInfo = new ProcessStartInfo
