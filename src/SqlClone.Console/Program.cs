@@ -9,14 +9,14 @@ using SqlClone.Domain.Interfaces;
 using SqlClone.Domain.Models;
 using SqlClone.Infrastructure;
 
+var requestedEnvironment = ResolveRequestedEnvironment(args);
 var builder = Host.CreateApplicationBuilder(args);
-
 var configBasePath = ResolveConfigBasePath();
 
 builder.Configuration
     .SetBasePath(configBasePath)
     .AddJsonFile("appsettings.json", optional: false, reloadOnChange: true)
-    .AddJsonFile($"appsettings.{builder.Environment.EnvironmentName}.json", optional: true, reloadOnChange: true)
+    .AddJsonFile($"appsettings.{requestedEnvironment}.json", optional: true, reloadOnChange: true)
     .AddJsonFile("appsettings.Local.json", optional: true, reloadOnChange: true)
     .AddEnvironmentVariables();
 
@@ -35,17 +35,21 @@ builder.Services.AddSqlClone();
 using var host = builder.Build();
 
 var root = new RootCommand("SQL clone utility");
-var envOption = new Option<string>("--environment", () => "Development", "Environment name override");
+var envOption = new Option<string>("--environment", () => requestedEnvironment, "Environment name override");
 var keepVolumeOption = new Option<bool>("--keep-volume", "Keep volume during teardown");
 
 var init = new Command("init", "Create config defaults and verify docker") { envOption };
-init.SetHandler(async (string environment) => await InitAsync(environment, host, configBasePath, CancellationToken.None), envOption);
+init.SetHandler(async (string environment) =>
+{
+    await InitAsync(environment, host, configBasePath, CancellationToken.None);
+}, envOption);
 
 var inspect = new Command("inspect-source", "Inspect source SQL endpoint");
 inspect.SetHandler(async () =>
 {
     var inspector = host.Services.GetRequiredService<ISourceInspector>();
     var databases = await inspector.GetDatabasesAsync(CancellationToken.None);
+
     Console.WriteLine($"Found {databases.Count} source user databases:");
     foreach (var db in databases)
     {
@@ -57,8 +61,10 @@ var clone = new Command("clone", "Provision local SQL clone") { envOption };
 clone.SetHandler(async (string environment) =>
 {
     host.Services.GetRequiredService<IOptions<CloneOptions>>().Value.EnvironmentName = environment;
+
     var orchestrator = host.Services.GetRequiredService<ICloneOrchestrator>();
     var result = await orchestrator.CloneAsync(CancellationToken.None);
+
     Console.WriteLine(result.Success ? "Clone succeeded." : "Clone failed.");
     foreach (var message in result.Messages)
     {
@@ -71,6 +77,7 @@ validate.SetHandler(async () =>
 {
     var validator = host.Services.GetRequiredService<ICloneValidator>();
     var result = await validator.ValidateAsync(CancellationToken.None);
+
     Console.WriteLine($"SQL reachable: {result.SqlReachable}");
     foreach (var db in result.Databases)
     {
@@ -111,7 +118,17 @@ static async Task InitAsync(string environment, IHost host, string configBasePat
     if (!File.Exists(localFile))
     {
         await File.WriteAllTextAsync(localFile, "{}", cancellationToken);
-        Console.WriteLine("Created appsettings.Local.json");
+        Console.WriteLine($"Created {localFile}");
+    }
+
+    var currentDirectoryExampleFile = Path.Combine(Environment.CurrentDirectory, "appsettings.example.json");
+    var configBasePathExampleFile = Path.Combine(configBasePath, "appsettings.example.json");
+    var appSettingsFile = Path.Combine(configBasePath, "appsettings.json");
+    if (!File.Exists(currentDirectoryExampleFile) && !File.Exists(configBasePathExampleFile) && File.Exists(appSettingsFile))
+    {
+        var appSettingsContent = await File.ReadAllTextAsync(appSettingsFile, cancellationToken);
+        await File.WriteAllTextAsync(currentDirectoryExampleFile, appSettingsContent, cancellationToken);
+        Console.WriteLine($"Created {currentDirectoryExampleFile}");
     }
 
     var dockerVersion = await RunProcessAsync("docker", "--version", cancellationToken);
@@ -126,6 +143,25 @@ static async Task InitAsync(string environment, IHost host, string configBasePat
     Console.WriteLine($"- Clone:Docker:SaPassword (current length: {options.Docker.SaPassword.Length})");
 }
 
+static string ResolveRequestedEnvironment(string[] args)
+{
+    for (var i = 0; i < args.Length; i++)
+    {
+        if (args[i].Equals("--environment", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
+        {
+            return args[i + 1];
+        }
+
+        if (args[i].StartsWith("--environment=", StringComparison.OrdinalIgnoreCase))
+        {
+            return args[i]["--environment=".Length..];
+        }
+    }
+
+    return Environment.GetEnvironmentVariable("DOTNET_ENVIRONMENT")
+        ?? Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT")
+        ?? "Development";
+}
 
 static string ResolveConfigBasePath()
 {
@@ -148,6 +184,7 @@ static string ResolveConfigBasePath()
 
     throw new FileNotFoundException("Could not locate appsettings.json in current directory, src/SqlClone.Console, or application base directory.");
 }
+
 static async Task<(int exitCode, string stdOut, string stdErr)> RunProcessAsync(string fileName, string arguments, CancellationToken cancellationToken)
 {
     var startInfo = new ProcessStartInfo

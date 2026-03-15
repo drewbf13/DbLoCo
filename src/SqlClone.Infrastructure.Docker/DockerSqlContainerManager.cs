@@ -102,11 +102,23 @@ public sealed class DockerSqlContainerManager : IDockerSqlContainerManager
             CreateNoWindow = true
         };
 
-        using var process = Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start docker process");
-        var stdOut = await process.StandardOutput.ReadToEndAsync(cancellationToken);
-        var stdErr = await process.StandardError.ReadToEndAsync(cancellationToken);
-        await process.WaitForExitAsync(cancellationToken);
+        try
+        {
+            using var process = Process.Start(startInfo);
+            if (process is null)
+            {
+                return (-1, string.Empty, "Failed to start docker process.");
+            }
 
-        return (process.ExitCode, stdOut, stdErr);
+            var stdOut = await process.StandardOutput.ReadToEndAsync(cancellationToken);
+            var stdErr = await process.StandardError.ReadToEndAsync(cancellationToken);
+            await process.WaitForExitAsync(cancellationToken);
+
+            return (process.ExitCode, stdOut, stdErr);
+        }
+        catch (Exception ex)
+        {
+            return (-1, string.Empty, ex.Message);
+        }
     }
 }

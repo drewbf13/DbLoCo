@@ -82,3 +82,11 @@ dotnet run --project src/SqlClone.Console -- teardown
 - Add security-focused secret providers
 - Add richer validation/report persistence
 - Add integration tests that run against ephemeral containers
+
+## First-launch checklist
+
+1. Run `dotnet run --project src/SqlClone.Console -- init` to verify Docker CLI and create local config stubs when missing.
+2. Copy/update `src/SqlClone.Console/appsettings.Local.json` with a real source connection string and secure SA password override.
+3. Run `dotnet run --project src/SqlClone.Console -- clone --environment Development`.
+
+Environment-specific config files are selected from the `--environment` command argument at startup, then overlaid with `appsettings.Local.json` and environment variables.
