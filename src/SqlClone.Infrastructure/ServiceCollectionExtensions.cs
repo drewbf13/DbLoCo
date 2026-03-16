@@ -27,13 +27,17 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<IDatabaseMaterializer>(sp =>
         {
             var options = sp.GetRequiredService<IOptions<CloneOptions>>().Value;
-            return options.Restore.Materializer.Equals("NoOp", StringComparison.OrdinalIgnoreCase)
-                ? sp.GetRequiredService<NoOpDatabaseMaterializer>()
-                : sp.GetRequiredService<CreateEmptyDatabaseMaterializer>();
+            return options.Restore.Materializer.ToLowerInvariant() switch
+            {
+                "noop" => sp.GetRequiredService<NoOpDatabaseMaterializer>(),
+                "azurebackup" => sp.GetRequiredService<AzureBackupDatabaseMaterializer>(),
+                _ => sp.GetRequiredService<CreateEmptyDatabaseMaterializer>()
+            };
         });
 
         services.AddSingleton<NoOpDatabaseMaterializer>();
         services.AddSingleton<CreateEmptyDatabaseMaterializer>();
+        services.AddSingleton<AzureBackupDatabaseMaterializer>();
 
         return services;
     }

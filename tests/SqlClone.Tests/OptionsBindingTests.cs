@@ -15,7 +15,9 @@ public sealed class OptionsBindingTests
                 ["Clone:EnvironmentName"] = "Development",
                 ["Clone:Docker:ContainerName"] = "sqlclone-test",
                 ["Clone:Restore:Materializer"] = "NoOp",
-                ["Clone:Restore:Databases:0"] = "DbOne"
+                ["Clone:Restore:Databases:0"] = "DbOne",
+                ["Clone:Restore:AzureBackup:BackupUrlTemplate"] = "https://acct.blob.core.windows.net/backups/{database}.bak",
+                ["Clone:Restore:AzureBackup:SqlCredentialName"] = "CloneCred"
             })
             .Build();
 
@@ -25,5 +27,7 @@ public sealed class OptionsBindingTests
         options!.Docker.ContainerName.Should().Be("sqlclone-test");
         options.Restore.Materializer.Should().Be("NoOp");
         options.Restore.Databases.Should().ContainSingle().Which.Should().Be("DbOne");
+        options.Restore.AzureBackup.BackupUrlTemplate.Should().Contain("{database}");
+        options.Restore.AzureBackup.SqlCredentialName.Should().Be("CloneCred");
     }
 }
