@@ -38,7 +38,10 @@ Important settings:
 - `Clone:Docker:HostPort`
 - `Clone:Docker:SaPassword`
 - `Clone:Source:ConnectionString`
-- `Clone:Restore:Materializer` (`CreateEmpty` or `NoOp`)
+- `Clone:Restore:Materializer` (`CreateEmpty`, `AzureBackup`, or `NoOp`)
+- `Clone:Restore:AzureBackup:BackupUrlTemplate`
+- `Clone:Restore:AzureBackup:SharedAccessSignature` (optional, auto-generated with current user identity when omitted)
+- `Clone:Restore:AzureBackup:SqlCredentialName`
 - `Clone:Restore:Databases`
 - `Clone:LinkedServers:Definitions`
 - `Clone:PostClone:ScriptFolders`
@@ -68,7 +71,7 @@ dotnet run --project src/SqlClone.Console -- teardown
 
 ## Known v1 limitations
 
-- No real Azure backup export/restore implementation yet
+- Azure backup restore requires accessible backup blobs and SQL Server support for `RESTORE ... FROM URL`
 - No bacpac automation
 - No login/user remapping workflow
 - No secret vault integration
