@@ -17,7 +17,16 @@ public sealed class OptionsBindingTests
                 ["Clone:Restore:Materializer"] = "NoOp",
                 ["Clone:Restore:Databases:0"] = "DbOne",
                 ["Clone:Restore:AzureBackup:BackupUrlTemplate"] = "https://acct.blob.core.windows.net/backups/{database}.bak",
-                ["Clone:Restore:AzureBackup:SqlCredentialName"] = "CloneCred"
+                ["Clone:Restore:AzureBackup:SqlCredentialName"] = "CloneCred",
+                ["Clone:Migration:Enabled"] = "true",
+                ["Clone:Migration:GitRepository"] = "https://example.com/repo.git",
+                ["Clone:Migration:Branch"] = "dev",
+                ["Clone:Migration:BuildCommand"] = "dotnet run",
+                ["Clone:Seed:Enabled"] = "true",
+                ["Clone:Seed:SourceDatabase"] = "DbOne",
+                ["Clone:Seed:Tables:0:Table"] = "Lookup",
+                ["Clone:Seed:Tables:0:Schema"] = "dbo",
+                ["Clone:Seed:Tables:0:TruncateTarget"] = "true"
             })
             .Build();
 
@@ -29,5 +38,9 @@ public sealed class OptionsBindingTests
         options.Restore.Databases.Should().ContainSingle().Which.Should().Be("DbOne");
         options.Restore.AzureBackup.BackupUrlTemplate.Should().Contain("{database}");
         options.Restore.AzureBackup.SqlCredentialName.Should().Be("CloneCred");
+        options.Migration.Enabled.Should().BeTrue();
+        options.Migration.Branch.Should().Be("dev");
+        options.Seed.Enabled.Should().BeTrue();
+        options.Seed.Tables.Should().ContainSingle();
     }
 }

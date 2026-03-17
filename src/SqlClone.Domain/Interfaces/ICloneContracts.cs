@@ -19,6 +19,16 @@ public interface IDatabaseMaterializer
     Task MaterializeAsync(DatabaseClonePlan plan, CancellationToken cancellationToken);
 }
 
+public interface IDatabaseMigrationRunner
+{
+    Task RunAsync(MigrationPlan migration, CancellationToken cancellationToken);
+}
+
+public interface ITableSeeder
+{
+    Task SeedAsync(IReadOnlyList<SeedTablePlan> tables, CancellationToken cancellationToken);
+}
+
 public interface ILinkedServerProvisioner
 {
     Task ApplyAsync(IReadOnlyList<LinkedServerDefinition> linkedServers, CancellationToken cancellationToken);

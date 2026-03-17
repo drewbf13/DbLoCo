@@ -27,8 +27,18 @@ public sealed class SqlConnectionFactory
         return new SqlConnection(builder.ConnectionString);
     }
 
-    public SqlConnection CreateSourceConnection()
+    public SqlConnection CreateSourceConnection(string? initialCatalog = null)
     {
-        return new SqlConnection(_options.Source.ConnectionString);
+        if (string.IsNullOrWhiteSpace(initialCatalog))
+        {
+            return new SqlConnection(_options.Source.ConnectionString);
+        }
+
+        var builder = new SqlConnectionStringBuilder(_options.Source.ConnectionString)
+        {
+            InitialCatalog = initialCatalog
+        };
+
+        return new SqlConnection(builder.ConnectionString);
     }
 }

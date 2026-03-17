@@ -43,6 +43,8 @@ Important settings:
 - `Clone:Restore:AzureBackup:SharedAccessSignature` (optional, auto-generated with current user identity when omitted)
 - `Clone:Restore:AzureBackup:SqlCredentialName`
 - `Clone:Restore:Databases`
+- `Clone:Migration:Enabled` / `GitRepository` / `Branch` / `BuildCommand`
+- `Clone:Seed:Enabled` / `SourceDatabase` / `Tables`
 - `Clone:LinkedServers:Definitions`
 - `Clone:PostClone:ScriptFolders`
 
@@ -58,6 +60,121 @@ When cloning:
 - applies linked servers
 - executes post-clone scripts (`*.sql`) in lexical order
 - validates SQL reachability, database existence, and linked server existence
+
+## Quick answer: copy an Azure SQL Managed Instance DB into local Docker
+
+If your goal is "take database X from SQL MI and run it locally in Docker", the v1 path is:
+
+1. **Take/locate a `.bak` backup for each database** you want from Managed Instance in Azure Blob Storage.
+2. **Set materializer to `AzureBackup`** in `appsettings.Local.json`.
+3. **Configure `BackupUrlTemplate` + SAS** so SQL Server in Docker can read each `.bak` over HTTPS.
+4. **Run `clone`** to create/start the container and run `RESTORE ... FROM URL` for each DB.
+
+Example `Clone:Restore` snippet:
+
+```json
+"Restore": {
+  "Materializer": "AzureBackup",
+  "Databases": [ "AppDb" ],
+  "AzureBackup": {
+    "BackupUrlTemplate": "https://<storage>.blob.core.windows.net/sql-backups/{sourceServer}/{database}.bak",
+    "SharedAccessSignature": "?sv=...",
+    "SqlCredentialName": "SqlCloneAzureBackupSas"
+  }
+}
+```
+
+Then run:
+
+```bash
+dotnet run --project src/SqlClone.Console -- clone --environment Development
+```
+
+Notes:
+
+- `CreateEmpty` does **not** copy MI data; it creates blank DBs only.
+- `NoOp` leaves DB materialization to you.
+- The local container must be able to reach Blob Storage, and the SQL credential/SAS must permit blob read access.
+
+### How to create the `.bak` in Azure Blob from SQL Managed Instance
+
+From SQL Managed Instance, you can write backups directly to Blob Storage with `BACKUP DATABASE ... TO URL`.
+
+1. Create a Blob container (for example: `sql-backups`).
+2. Generate a SAS token for that container with **Write** + **List** (for backup) and later **Read** (for restore).
+3. In the MI `master` database, create a SQL credential that uses the SAS token.
+4. Run `BACKUP DATABASE ... TO URL` for each database you want to clone.
+
+Example in MI:
+
+```sql
+USE [master];
+GO
+
+-- Name can be any SQL credential name; keep it simple and reusable.
+CREATE CREDENTIAL [https://<storage-account>.blob.core.windows.net/sql-backups]
+WITH IDENTITY = 'SHARED ACCESS SIGNATURE',
+SECRET = '<sas-token-without-leading-question-mark>';
+GO
+
+BACKUP DATABASE [AppDb]
+TO URL = 'https://<storage-account>.blob.core.windows.net/sql-backups/<mi-server-name>/AppDb.bak'
+WITH COPY_ONLY, COMPRESSION, CHECKSUM, STATS = 10;
+GO
+```
+
+After the backup completes, point `Clone:Restore:AzureBackup:BackupUrlTemplate` to the same Blob path pattern, and provide a SAS that local SQL Server can read.
+
+### Alternative: export/import (BACPAC or data movement)
+
+If your goal is schema + data portability (instead of native SQL backup semantics), export/import can be simpler:
+
+- **BACPAC**: export from Azure SQL Managed Instance and import into your local SQL Server instance/container.
+- **Data movement**: use ETL/copy tooling to move schema + data directly.
+
+When deciding between approaches:
+
+- Use **native backup/restore** when you want SQL Server backup fidelity (`.bak` + restore behavior).
+- Use **BACPAC** when you want a portable package and can accept that it is a logical export/import workflow.
+- Microsoft notes BACPAC export of a **TDE-protected** database is supported, and the exported BACPAC content is not protected by TDE encryption.
+
+For this project today, BACPAC/data-movement execution is not automated in `SqlClone` v1 (see Known limitations), so run those steps outside the tool and use `NoOp`/`CreateEmpty` as needed.
+
+
+### Migration + seed workflow (source repo + Azure SQL seed tables)
+
+If you can build schema migrations from source code, configure SqlClone like this:
+
+1. Set `Clone:Restore:Materializer` to `CreateEmpty` (or `NoOp`) so the target DB exists without depending on native backup restore.
+2. Enable `Clone:Migration` with the git repo + branch + migration build command.
+3. Enable `Clone:Seed` and list tables to copy from Azure SQL source into your local DB after migration runs.
+
+Example:
+
+```json
+"Migration": {
+  "Enabled": true,
+  "GitRepository": "https://github.com/your-org/your-db-migrations.git",
+  "Branch": "main",
+  "BuildCommand": "dotnet run --project tools/DbMigrate -- --connection \"Server=localhost,14333;Database=AppDb;User Id=sa;Password=YourStrong!Passw0rd;Encrypt=False;TrustServerCertificate=True\"",
+  "WorkingDirectory": ""
+},
+"Seed": {
+  "Enabled": true,
+  "SourceDatabase": "AppDb",
+  "Tables": [
+    {
+      "SourceDatabase": "AppDb",
+      "TargetDatabase": "AppDb",
+      "Schema": "dbo",
+      "Table": "ReferenceData",
+      "TruncateTarget": true
+    }
+  ]
+}
+```
+
+The clone sequence becomes: start container -> materialize DB -> run migration build from configured git branch -> seed configured tables from Azure SQL source -> linked servers/post-clone scripts/validation.
 
 ## Commands
 
