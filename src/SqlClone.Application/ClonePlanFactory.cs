@@ -29,8 +29,9 @@ public sealed class ClonePlanFactory : IClonePlanFactory
                 TargetDatabase = string.IsNullOrWhiteSpace(table.TargetDatabase) ? options.Seed.SourceDatabase : table.TargetDatabase,
                 Schema = string.IsNullOrWhiteSpace(table.Schema) ? "dbo" : table.Schema,
                 Table = table.Table,
-                TruncateTarget = table.TruncateTarget
-            }).Where(table => !string.IsNullOrWhiteSpace(table.SourceDatabase) && !string.IsNullOrWhiteSpace(table.TargetDatabase) && !string.IsNullOrWhiteSpace(table.Table)).ToList()
+                TruncateTarget = table.TruncateTarget,
+                Order = table.Order
+            }).Where(table => !string.IsNullOrWhiteSpace(table.SourceDatabase) && !string.IsNullOrWhiteSpace(table.TargetDatabase) && !string.IsNullOrWhiteSpace(table.Table)).OrderBy(table => table.Order).ThenBy(table => table.Schema).ThenBy(table => table.Table).ToList()
         };
     }
 }

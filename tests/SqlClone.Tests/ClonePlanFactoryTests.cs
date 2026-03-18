@@ -28,7 +28,11 @@ public sealed class ClonePlanFactoryTests
             {
                 Enabled = true,
                 SourceDatabase = "AppDb",
-                Tables = [new SeedTableOptions { Table = "ReferenceData", TruncateTarget = true }]
+                Tables =
+                [
+                    new SeedTableOptions { Table = "ZZAfter", TruncateTarget = true, Order = 20 },
+                    new SeedTableOptions { Table = "AAFirst", TruncateTarget = true, Order = 10 }
+                ]
             },
             LinkedServers = new LinkedServersOptions
             {
@@ -45,7 +49,9 @@ public sealed class ClonePlanFactoryTests
         plan.LinkedServers.Should().ContainSingle(ls => ls.Name == "REMOTE1");
         plan.Migration.Enabled.Should().BeTrue();
         plan.Migration.Branch.Should().Be("feature/seed");
-        plan.SeedTables.Should().ContainSingle();
+        plan.SeedTables.Should().HaveCount(2);
+        plan.SeedTables[0].Table.Should().Be("AAFirst");
+        plan.SeedTables[0].Order.Should().Be(10);
         plan.SeedTables[0].SourceDatabase.Should().Be("AppDb");
     }
 }

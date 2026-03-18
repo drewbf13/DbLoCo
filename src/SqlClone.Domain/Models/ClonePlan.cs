@@ -32,4 +32,5 @@ public sealed class SeedTablePlan
     public required string Schema { get; init; }
     public required string Table { get; init; }
     public bool TruncateTarget { get; init; }
+    public int Order { get; init; }
 }

@@ -168,13 +168,20 @@ Example:
       "TargetDatabase": "AppDb",
       "Schema": "dbo",
       "Table": "ReferenceData",
-      "TruncateTarget": true
+      "TruncateTarget": true,
+      "Order": 10
     }
   ]
 }
 ```
 
 The clone sequence becomes: start container -> materialize DB -> run migration build from configured git branch -> seed configured tables from Azure SQL source -> linked servers/post-clone scripts/validation.
+
+Ordering notes:
+
+- **Migration ordering** is controlled by your migration tool/repo (via `BuildCommand`). SqlClone invokes that command once.
+- **Seed ordering** is controlled by `Clone:Seed:Tables[*]:Order` (ascending). If values tie, SqlClone falls back to schema/table name ordering.
+- **Post-clone scripts** still run in lexical file name order.
 
 ## Commands
 

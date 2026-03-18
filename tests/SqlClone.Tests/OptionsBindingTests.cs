@@ -26,7 +26,8 @@ public sealed class OptionsBindingTests
                 ["Clone:Seed:SourceDatabase"] = "DbOne",
                 ["Clone:Seed:Tables:0:Table"] = "Lookup",
                 ["Clone:Seed:Tables:0:Schema"] = "dbo",
-                ["Clone:Seed:Tables:0:TruncateTarget"] = "true"
+                ["Clone:Seed:Tables:0:TruncateTarget"] = "true",
+                ["Clone:Seed:Tables:0:Order"] = "20"
             })
             .Build();
 
@@ -42,5 +43,6 @@ public sealed class OptionsBindingTests
         options.Migration.Branch.Should().Be("dev");
         options.Seed.Enabled.Should().BeTrue();
         options.Seed.Tables.Should().ContainSingle();
+        options.Seed.Tables[0].Order.Should().Be(20);
     }
 }
