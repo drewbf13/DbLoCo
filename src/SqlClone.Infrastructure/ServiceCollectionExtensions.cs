@@ -20,6 +20,8 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<SqlExecutionHelper>();
 
         services.AddSingleton<ISourceInspector, SourceInspector>();
+        services.AddSingleton<IDatabaseMigrationRunner, GitDatabaseMigrationRunner>();
+        services.AddSingleton<ITableSeeder, SqlTableSeeder>();
         services.AddSingleton<ILinkedServerProvisioner, LinkedServerProvisioner>();
         services.AddSingleton<IPostCloneScriptRunner, PostCloneScriptRunner>();
         services.AddSingleton<ICloneValidator, CloneValidator>();
