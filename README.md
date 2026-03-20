@@ -186,7 +186,9 @@ If your migrations project is already on your machine, set `Clone:Migration:Loca
 - **Apply directly via tool code** (for example a custom migrator app):
   - `dotnet run --project tools/DbMigrate -- --connection "..."`
 - **Generate a SQL script, then execute it** (works well when devs already use EF tools):
-  - `dotnet ef migrations script --idempotent --project src/App.Data --startup-project src/App.Api --output artifacts/migrate.sql && sqlcmd -S localhost,14333 -d AppDb -U sa -P "YourStrong!Passw0rd" -i artifacts/migrate.sql -b`
+  - `dotnet ef migrations script --idempotent --project src/App.Data --startup-project src/App.Api --output artifacts/migrate.sql --no-transactions && sqlcmd -S localhost,14333 -d AppDb -U sa -P "YourStrong!Passw0rd" -I -i artifacts/migrate.sql -b`
+
+If SQL Server returns `CREATE INDEX failed ... SET options have incorrect settings: 'QUOTED_IDENTIFIER'`, make sure your `sqlcmd` invocation includes `-I` so quoted identifiers are enabled for the session that runs the script.
 
 This script-first pattern is usually simpler than having SqlClone dynamically load a referenced `DbContext` and call `Migrate()` itself, because it keeps SqlClone decoupled from application assemblies, runtime versions, and design-time `DbContext` wiring.
 
