@@ -54,6 +54,8 @@ public sealed class SqlTableSeeder : ITableSeeder
 
         await using var reader = await sourceCommand.ExecuteReaderAsync(cancellationToken);
         var primaryKeyColumns = await LoadPrimaryKeyColumnListAsync(target, table, cancellationToken);
+        var identityColumns = await LoadIdentityColumnListAsync(target, table, cancellationToken);
+        var includesIdentityColumns = columnList.Any(c => identityColumns.Contains(c, StringComparer.OrdinalIgnoreCase));
         var useMergeStrategy = table.TruncateTarget && primaryKeyColumns.Count > 0;
 
         if (useMergeStrategy)
@@ -64,12 +66,17 @@ public sealed class SqlTableSeeder : ITableSeeder
                 $"SELECT TOP (0) {escapedColumns} INTO {tempTableName} FROM {destinationName};",
                 cancellationToken);
 
-            using (var bulkCopy = CreateBulkCopy(target, tempTableName, columnList))
+            using (var bulkCopy = CreateBulkCopy(target, tempTableName, columnList, includesIdentityColumns))
             {
                 await bulkCopy.WriteToServerAsync(reader, cancellationToken);
             }
 
             var mergeSql = BuildMergeSql(destinationName, tempTableName, columnList, primaryKeyColumns);
+            if (includesIdentityColumns)
+            {
+                mergeSql = WrapWithIdentityInsert(destinationName, mergeSql);
+            }
+
             await _sql.ExecuteNonQueryAsync(target, mergeSql, cancellationToken);
             await _sql.ExecuteNonQueryAsync(target, $"DROP TABLE {tempTableName};", cancellationToken);
         }
@@ -85,7 +92,7 @@ public sealed class SqlTableSeeder : ITableSeeder
                 await _sql.ExecuteNonQueryAsync(target, $"TRUNCATE TABLE {destinationName};", cancellationToken);
             }
 
-            using var bulkCopy = CreateBulkCopy(target, destinationName, columnList);
+            using var bulkCopy = CreateBulkCopy(target, destinationName, columnList, includesIdentityColumns);
             await bulkCopy.WriteToServerAsync(reader, cancellationToken);
         }
 
@@ -151,9 +158,35 @@ ORDER BY k.ORDINAL_POSITION;";
         return columns;
     }
 
-    private static SqlBulkCopy CreateBulkCopy(SqlConnection target, string destination, IEnumerable<string> columns)
+    private static async Task<List<string>> LoadIdentityColumnListAsync(SqlConnection target, SeedTablePlan table, CancellationToken cancellationToken)
     {
-        var bulkCopy = new SqlBulkCopy(target)
+        const string sql = @"
+SELECT c.name
+FROM sys.identity_columns c
+INNER JOIN sys.tables t ON c.object_id = t.object_id
+INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
+WHERE s.name = @schema
+  AND t.name = @table;";
+
+        await using var command = target.CreateCommand();
+        command.CommandText = sql;
+        command.Parameters.AddWithValue("@schema", table.Schema);
+        command.Parameters.AddWithValue("@table", table.Table);
+
+        var columns = new List<string>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            columns.Add(reader.GetString(0));
+        }
+
+        return columns;
+    }
+
+    private static SqlBulkCopy CreateBulkCopy(SqlConnection target, string destination, IEnumerable<string> columns, bool keepIdentity)
+    {
+        var options = keepIdentity ? SqlBulkCopyOptions.KeepIdentity : SqlBulkCopyOptions.Default;
+        var bulkCopy = new SqlBulkCopy(target, options, null)
         {
             DestinationTableName = destination,
             BulkCopyTimeout = 600
@@ -196,6 +229,12 @@ WHEN NOT MATCHED BY TARGET THEN
     INSERT ({insertColumns})
     VALUES ({insertValues});";
     }
+
+    private static string WrapWithIdentityInsert(string destinationName, string sql) =>
+        $@"
+SET IDENTITY_INSERT {destinationName} ON;
+{sql}
+SET IDENTITY_INSERT {destinationName} OFF;";
 
     private static string EscapeIdentifier(string value) => value.Replace("]", "]]", StringComparison.Ordinal);
 }
