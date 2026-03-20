@@ -206,10 +206,13 @@ Ordering notes:
 ```bash
 dotnet run --project src/SqlClone.Console -- init
 dotnet run --project src/SqlClone.Console -- inspect-source
+dotnet run --project src/SqlClone.Console -- generate-seed-config --source-database AppDb
 dotnet run --project src/SqlClone.Console -- clone --environment Development
 dotnet run --project src/SqlClone.Console -- validate
 dotnet run --project src/SqlClone.Console -- teardown
 ```
+
+`generate-seed-config` emits a JSON `Seed` section with table `Order` values computed from foreign-key dependencies (parents before children). Use `--target-database` to override target DB name and `--truncate-target false` if you want generated entries to keep existing rows.
 
 ## Known v1 limitations
 

@@ -5,6 +5,11 @@ namespace SqlClone.Domain.Interfaces;
 public interface ISourceInspector
 {
     Task<IReadOnlyList<SourceDatabaseInfo>> GetDatabasesAsync(CancellationToken cancellationToken);
+    Task<string> GenerateSeedConfigSectionAsync(
+        string sourceDatabase,
+        string targetDatabase,
+        bool truncateTarget,
+        CancellationToken cancellationToken);
 }
 
 public interface IDockerSqlContainerManager

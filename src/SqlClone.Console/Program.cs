@@ -57,6 +57,30 @@ inspect.SetHandler(async () =>
     }
 });
 
+var seedSourceDatabaseOption = new Option<string>("--source-database", "Source database name")
+{
+    IsRequired = true
+};
+var seedTargetDatabaseOption = new Option<string?>("--target-database", "Target database name (defaults to source database)");
+var truncateTargetOption = new Option<bool>("--truncate-target", () => true, "Set TruncateTarget value in generated entries");
+var generateSeed = new Command("generate-seed-config", "Generate a Seed config section ordered by foreign-key dependencies")
+{
+    seedSourceDatabaseOption,
+    seedTargetDatabaseOption,
+    truncateTargetOption
+};
+generateSeed.SetHandler(async (string sourceDatabase, string? targetDatabase, bool truncateTarget) =>
+{
+    var inspector = host.Services.GetRequiredService<ISourceInspector>();
+    var effectiveTargetDatabase = string.IsNullOrWhiteSpace(targetDatabase) ? sourceDatabase : targetDatabase;
+    var json = await inspector.GenerateSeedConfigSectionAsync(
+        sourceDatabase,
+        effectiveTargetDatabase,
+        truncateTarget,
+        CancellationToken.None);
+    Console.WriteLine(json);
+}, seedSourceDatabaseOption, seedTargetDatabaseOption, truncateTargetOption);
+
 var clone = new Command("clone", "Provision local SQL clone") { envOption };
 clone.SetHandler(async (string environment) =>
 {
@@ -106,6 +130,7 @@ teardown.SetHandler(async (bool keepVolume) =>
 
 root.Add(init);
 root.Add(inspect);
+root.Add(generateSeed);
 root.Add(clone);
 root.Add(validate);
 root.Add(teardown);
