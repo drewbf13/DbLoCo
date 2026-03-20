@@ -148,9 +148,9 @@ public sealed class AzureBackupDatabaseMaterializer : IDatabaseMaterializer
             if (file.IsLog)
             {
                 logIndex++;
-                var suffix = logIndex == 1 ? string.Empty : $"_{logIndex}";
-                var targetFile = $"{databaseName}_log{suffix}.ldf";
-                return $",\n                 MOVE N'{EscapeSqlString(file.LogicalName)}' TO N'{EscapeSqlString(Path.Combine(logPath, targetFile))}'";
+                var suffix1 = logIndex == 1 ? string.Empty : $"_{logIndex}";
+                var targetFile1 = $"{databaseName}_log{suffix1}.ldf";
+                return $",\n                 MOVE N'{EscapeSqlString(file.LogicalName)}' TO N'{EscapeSqlString(Path.Combine(logPath, targetFile1))}'";
             }
 
             dataIndex++;

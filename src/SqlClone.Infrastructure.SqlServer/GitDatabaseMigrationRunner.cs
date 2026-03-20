@@ -84,18 +84,16 @@ public sealed class GitDatabaseMigrationRunner : IDatabaseMigrationRunner
         }
         finally
         {
-            if (!cleanupWorkRoot || string.IsNullOrWhiteSpace(workRoot))
+            if (cleanupWorkRoot && !string.IsNullOrWhiteSpace(workRoot))
             {
-                return;
-            }
-
-            try
-            {
-                Directory.Delete(workRoot, recursive: true);
-            }
-            catch
-            {
-                _logger.LogDebug("Could not clean temporary migration directory {Directory}", workRoot);
+                try
+                {
+                    Directory.Delete(workRoot, recursive: true);
+                }
+                catch
+                {
+                    _logger.LogDebug("Could not clean temporary migration directory {Directory}", workRoot);
+                }
             }
         }
     }
