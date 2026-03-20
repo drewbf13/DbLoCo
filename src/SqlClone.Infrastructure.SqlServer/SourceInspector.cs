@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Logging;
 using SqlClone.Domain.Interfaces;
 using SqlClone.Domain.Models;
+using System.Text.Json;
 
 namespace SqlClone.Infrastructure.SqlServer;
 
@@ -46,4 +47,165 @@ public sealed class SourceInspector : ISourceInspector
 
         return databases;
     }
+
+    public async Task<string> GenerateSeedConfigSectionAsync(
+        string sourceDatabase,
+        string targetDatabase,
+        bool truncateTarget,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = _factory.CreateSourceConnection(sourceDatabase);
+        await connection.OpenAsync(cancellationToken);
+
+        var tables = await GetUserTablesAsync(connection, cancellationToken);
+        var foreignKeyDependencies = await GetForeignKeyDependenciesAsync(connection, cancellationToken);
+        var orderedTables = TopologicalOrderTables(tables, foreignKeyDependencies);
+
+        var seedTables = orderedTables
+            .Select((table, index) => new SeedTableOptions
+            {
+                SourceDatabase = sourceDatabase,
+                TargetDatabase = targetDatabase,
+                Schema = table.Schema,
+                Table = table.Table,
+                TruncateTarget = truncateTarget,
+                Order = (index + 1) * 10
+            })
+            .ToList();
+
+        var payload = new
+        {
+            Seed = new SeedOptions
+            {
+                Enabled = true,
+                SourceDatabase = sourceDatabase,
+                Tables = seedTables
+            }
+        };
+
+        return JsonSerializer.Serialize(payload, new JsonSerializerOptions { WriteIndented = true });
+    }
+
+    private static async Task<List<TableNode>> GetUserTablesAsync(Microsoft.Data.SqlClient.SqlConnection connection, CancellationToken cancellationToken)
+    {
+        const string sql = """
+            SELECT s.name, t.name
+            FROM sys.tables t
+            INNER JOIN sys.schemas s ON s.schema_id = t.schema_id
+            WHERE t.is_ms_shipped = 0
+            ORDER BY s.name, t.name;
+            """;
+
+        var tables = new List<TableNode>();
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            tables.Add(new TableNode(reader.GetString(0), reader.GetString(1)));
+        }
+
+        return tables;
+    }
+
+    private static async Task<List<ForeignKeyDependency>> GetForeignKeyDependenciesAsync(Microsoft.Data.SqlClient.SqlConnection connection, CancellationToken cancellationToken)
+    {
+        const string sql = """
+            SELECT
+                ps.name AS ParentSchema,
+                pt.name AS ParentTable,
+                rs.name AS ReferencedSchema,
+                rt.name AS ReferencedTable
+            FROM sys.foreign_keys fk
+            INNER JOIN sys.tables pt ON fk.parent_object_id = pt.object_id
+            INNER JOIN sys.schemas ps ON pt.schema_id = ps.schema_id
+            INNER JOIN sys.tables rt ON fk.referenced_object_id = rt.object_id
+            INNER JOIN sys.schemas rs ON rt.schema_id = rs.schema_id;
+            """;
+
+        var dependencies = new List<ForeignKeyDependency>();
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            dependencies.Add(new ForeignKeyDependency(
+                new TableNode(reader.GetString(0), reader.GetString(1)),
+                new TableNode(reader.GetString(2), reader.GetString(3))));
+        }
+
+        return dependencies;
+    }
+
+    private static List<TableNode> TopologicalOrderTables(
+        IReadOnlyList<TableNode> tables,
+        IReadOnlyList<ForeignKeyDependency> dependencies)
+    {
+        var tableKeyLookup = tables.ToDictionary(t => t.Key, t => t, StringComparer.OrdinalIgnoreCase);
+        var inDegree = tables.ToDictionary(t => t.Key, _ => 0, StringComparer.OrdinalIgnoreCase);
+        var outgoing = tables.ToDictionary(t => t.Key, _ => new HashSet<string>(StringComparer.OrdinalIgnoreCase), StringComparer.OrdinalIgnoreCase);
+
+        foreach (var dependency in dependencies)
+        {
+            var parentKey = dependency.Parent.Key;
+            var referencedKey = dependency.Referenced.Key;
+            if (!tableKeyLookup.ContainsKey(parentKey) || !tableKeyLookup.ContainsKey(referencedKey))
+            {
+                continue;
+            }
+
+            if (parentKey.Equals(referencedKey, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (outgoing[referencedKey].Add(parentKey))
+            {
+                inDegree[parentKey]++;
+            }
+        }
+
+        var queue = new PriorityQueue<TableNode, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var table in tables.Where(t => inDegree[t.Key] == 0))
+        {
+            queue.Enqueue(table, table.Key);
+        }
+
+        var ordered = new List<TableNode>(tables.Count);
+        while (queue.Count > 0)
+        {
+            var current = queue.Dequeue();
+            ordered.Add(current);
+
+            foreach (var dependentKey in outgoing[current.Key].OrderBy(k => k, StringComparer.OrdinalIgnoreCase))
+            {
+                inDegree[dependentKey]--;
+                if (inDegree[dependentKey] == 0)
+                {
+                    queue.Enqueue(tableKeyLookup[dependentKey], dependentKey);
+                }
+            }
+        }
+
+        if (ordered.Count == tables.Count)
+        {
+            return ordered;
+        }
+
+        // Cycles (including mutual references) cannot be fully topologically sorted.
+        // Keep deterministic output by appending unresolved tables alphabetically.
+        var unresolved = tables
+            .Where(t => ordered.All(o => !o.Key.Equals(t.Key, StringComparison.OrdinalIgnoreCase)))
+            .OrderBy(t => t.Key, StringComparer.OrdinalIgnoreCase);
+
+        ordered.AddRange(unresolved);
+        return ordered;
+    }
+
+    private sealed record TableNode(string Schema, string Table)
+    {
+        public string Key => $"{Schema}.{Table}";
+    }
+
+    private sealed record ForeignKeyDependency(TableNode Parent, TableNode Referenced);
 }
