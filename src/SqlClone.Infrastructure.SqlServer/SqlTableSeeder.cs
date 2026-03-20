@@ -70,10 +70,20 @@ public sealed class SqlTableSeeder : ITableSeeder
         await source.OpenAsync(cancellationToken);
         await target.OpenAsync(cancellationToken);
 
-        var columnList = await LoadColumnListAsync(source, table, cancellationToken);
+        var computedColumns = await LoadComputedColumnListAsync(target, table, cancellationToken);
+        var columnList = (await LoadColumnListAsync(source, table, cancellationToken))
+            .Where(c => !computedColumns.Contains(c, StringComparer.OrdinalIgnoreCase))
+            .ToList();
         if (columnList.Count == 0)
         {
-            throw new InvalidOperationException($"No columns found for source table {table.SourceDatabase}.{table.Schema}.{table.Table}");
+            if (computedColumns.Count > 0)
+            {
+                throw new InvalidOperationException(
+                    $"No writable columns found for source table {table.SourceDatabase}.{table.Schema}.{table.Table} after excluding computed columns.");
+            }
+
+            throw new InvalidOperationException(
+                $"No columns found for source table {table.SourceDatabase}.{table.Schema}.{table.Table}");
         }
 
         var escapedColumns = string.Join(", ", columnList.Select(c => $"[{EscapeIdentifier(c)}]"));
@@ -135,6 +145,16 @@ public sealed class SqlTableSeeder : ITableSeeder
             table.TargetDatabase,
             table.Schema,
             table.Table);
+
+        if (computedColumns.Count > 0)
+        {
+            _logger.LogInformation(
+                "Skipped computed columns for {TargetDatabase}.{Schema}.{Table}: {Columns}",
+                table.TargetDatabase,
+                table.Schema,
+                table.Table,
+                string.Join(", ", computedColumns.OrderBy(c => c, StringComparer.OrdinalIgnoreCase)));
+        }
     }
 
     private static async Task<List<string>> LoadColumnListAsync(SqlConnection source, SeedTablePlan table, CancellationToken cancellationToken)
@@ -198,6 +218,32 @@ INNER JOIN sys.tables t ON c.object_id = t.object_id
 INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
 WHERE s.name = @schema
   AND t.name = @table;";
+
+        await using var command = target.CreateCommand();
+        command.CommandText = sql;
+        command.Parameters.AddWithValue("@schema", table.Schema);
+        command.Parameters.AddWithValue("@table", table.Table);
+
+        var columns = new List<string>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            columns.Add(reader.GetString(0));
+        }
+
+        return columns;
+    }
+
+    private static async Task<List<string>> LoadComputedColumnListAsync(SqlConnection target, SeedTablePlan table, CancellationToken cancellationToken)
+    {
+        const string sql = @"
+SELECT c.name
+FROM sys.columns c
+INNER JOIN sys.tables t ON c.object_id = t.object_id
+INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
+WHERE s.name = @schema
+  AND t.name = @table
+  AND c.is_computed = 1;";
 
         await using var command = target.CreateCommand();
         command.CommandText = sql;
