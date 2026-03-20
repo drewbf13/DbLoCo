@@ -15,4 +15,5 @@ public sealed class SeedTableOptions
     public string Table { get; set; } = string.Empty;
     public bool TruncateTarget { get; set; }
     public int Order { get; set; }
+    public int GroupKey { get; set; }
 }

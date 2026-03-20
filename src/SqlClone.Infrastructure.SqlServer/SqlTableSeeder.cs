@@ -23,9 +23,15 @@ public sealed class SqlTableSeeder : ITableSeeder
 
     public async Task SeedAsync(IReadOnlyList<SeedTablePlan> tables, CancellationToken cancellationToken)
     {
-        foreach (var table in tables)
+        foreach (var dependencyLevel in tables.GroupBy(table => table.GroupKey > 0 ? table.GroupKey : table.Order).OrderBy(group => group.Key))
         {
-            await SeedTableAsync(table, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var levelTasks = dependencyLevel
+                .Select(table => SeedTableAsync(table, cancellationToken))
+                .ToArray();
+
+            await Task.WhenAll(levelTasks);
         }
     }
 

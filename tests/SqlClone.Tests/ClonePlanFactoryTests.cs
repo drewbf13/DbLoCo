@@ -31,8 +31,8 @@ public sealed class ClonePlanFactoryTests
                 SourceDatabase = "AppDb",
                 Tables =
                 [
-                    new SeedTableOptions { Table = "ZZAfter", TruncateTarget = true, Order = 20 },
-                    new SeedTableOptions { Table = "AAFirst", TruncateTarget = true, Order = 10 }
+                    new SeedTableOptions { Table = "ZZAfter", TruncateTarget = true, Order = 20, GroupKey = 2 },
+                    new SeedTableOptions { Table = "AAFirst", TruncateTarget = true, Order = 10, GroupKey = 1 }
                 ]
             },
             LinkedServers = new LinkedServersOptions
@@ -55,5 +55,6 @@ public sealed class ClonePlanFactoryTests
         plan.SeedTables[0].Table.Should().Be("AAFirst");
         plan.SeedTables[0].Order.Should().Be(10);
         plan.SeedTables[0].SourceDatabase.Should().Be("AppDb");
+        plan.SeedTables[0].GroupKey.Should().Be(1);
     }
 }

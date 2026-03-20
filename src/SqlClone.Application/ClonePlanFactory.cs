@@ -31,8 +31,15 @@ public sealed class ClonePlanFactory : IClonePlanFactory
                 Schema = string.IsNullOrWhiteSpace(table.Schema) ? "dbo" : table.Schema,
                 Table = table.Table,
                 TruncateTarget = table.TruncateTarget,
-                Order = table.Order
-            }).Where(table => !string.IsNullOrWhiteSpace(table.SourceDatabase) && !string.IsNullOrWhiteSpace(table.TargetDatabase) && !string.IsNullOrWhiteSpace(table.Table)).OrderBy(table => table.Order).ThenBy(table => table.Schema).ThenBy(table => table.Table).ToList()
+                Order = table.Order,
+                GroupKey = table.GroupKey > 0 ? table.GroupKey : table.Order
+            })
+            .Where(table => !string.IsNullOrWhiteSpace(table.SourceDatabase) && !string.IsNullOrWhiteSpace(table.TargetDatabase) && !string.IsNullOrWhiteSpace(table.Table))
+            .OrderBy(table => table.GroupKey)
+            .ThenBy(table => table.Order)
+            .ThenBy(table => table.Schema)
+            .ThenBy(table => table.Table)
+            .ToList()
         };
     }
 }
