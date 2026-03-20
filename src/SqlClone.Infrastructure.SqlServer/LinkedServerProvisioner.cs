@@ -40,6 +40,8 @@ public sealed class LinkedServerProvisioner : ILinkedServerProvisioner
     {
         static string B(bool value) => value ? "true" : "false";
         string esc(string value) => value.Replace("'", "''", StringComparison.Ordinal);
+        var usesSqlServerProviderPattern = linkedServer.Product.Equals("SQL Server", StringComparison.OrdinalIgnoreCase);
+        var product = usesSqlServerProviderPattern ? string.Empty : linkedServer.Product;
         var hasSqlAuth = !string.IsNullOrWhiteSpace(linkedServer.UserId) && !string.IsNullOrWhiteSpace(linkedServer.Password);
         var loginSql = hasSqlAuth
             ? $"""
@@ -70,7 +72,7 @@ public sealed class LinkedServerProvisioner : ILinkedServerProvisioner
             BEGIN
                 EXEC master.dbo.sp_addlinkedserver
                     @server = N'{esc(linkedServer.Name)}',
-                    @srvproduct = N'{esc(linkedServer.Product)}',
+                    @srvproduct = N'{esc(product)}',
                     @provider = N'{esc(linkedServer.Provider)}',
                     @datasrc = N'{esc(linkedServer.DataSource)}',
                     @catalog = {(linkedServer.Catalog is null ? "NULL" : $"N'{esc(linkedServer.Catalog)}'")};
