@@ -146,7 +146,7 @@ For this project today, BACPAC/data-movement execution is not automated in `SqlC
 If you can build schema migrations from source code, configure SqlClone like this:
 
 1. Set `Clone:Restore:Materializer` to `CreateEmpty` (or `NoOp`) so the target DB exists without depending on native backup restore.
-2. Enable `Clone:Migration` with either a git repo + branch **or** a local repository path + migration build command.
+2. Enable `Clone:Migration` with either a git repo + branch **or** a local repository path + migration command.
 3. Enable `Clone:Seed` and list tables to copy from Azure SQL source into your local DB after migration runs.
 
 Example:
@@ -176,9 +176,18 @@ Example:
 }
 ```
 
-The clone sequence becomes: start container -> materialize DB -> run migration build from configured git branch -> seed configured tables from Azure SQL source -> linked servers/post-clone scripts/validation.
+The clone sequence becomes: start container -> materialize DB -> run the configured migration command from the configured repository/branch -> seed configured tables from Azure SQL source -> linked servers/post-clone scripts/validation.
 
 If your migrations project is already on your machine, set `Clone:Migration:LocalRepositoryPath` and leave `GitRepository` blank. SqlClone will run `BuildCommand` directly from that local path (plus `WorkingDirectory`, if set) and skip git clone.
+
+`BuildCommand` is intentionally generic: SqlClone executes it once and treats your migration repo/tooling as the source of truth. Common patterns:
+
+- **Apply directly via tool code** (for example a custom migrator app):
+  - `dotnet run --project tools/DbMigrate -- --connection "..."`
+- **Generate a SQL script, then execute it** (works well when devs already use EF tools):
+  - `dotnet ef migrations script --idempotent --project src/App.Data --startup-project src/App.Api --output artifacts/migrate.sql && sqlcmd -S localhost,14333 -d AppDb -U sa -P "YourStrong!Passw0rd" -i artifacts/migrate.sql -b`
+
+This script-first pattern is usually simpler than having SqlClone dynamically load a referenced `DbContext` and call `Migrate()` itself, because it keeps SqlClone decoupled from application assemblies, runtime versions, and design-time `DbContext` wiring.
 
 Ordering notes:
 
