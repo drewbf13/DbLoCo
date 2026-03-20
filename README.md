@@ -190,6 +190,21 @@ If your migrations project is already on your machine, set `Clone:Migration:Loca
 
 If SQL Server returns `CREATE INDEX failed ... SET options have incorrect settings: 'QUOTED_IDENTIFIER'`, make sure your `sqlcmd` invocation includes `-I` so quoted identifiers are enabled for the session that runs the script.
 
+If an idempotent script fails with `Incorrect syntax near the keyword 'VIEW'`, your migration likely emits a raw `CREATE VIEW` inside an `IF ... BEGIN ... END` block. In SQL Server, `CREATE VIEW` must be the first statement in its batch. Shape those migrations with dynamic SQL so the `CREATE VIEW` executes in its own inner batch, for example:
+
+```csharp
+migrationBuilder.Sql(
+    """
+    EXEC(N'
+    CREATE OR ALTER VIEW dbo.MyView
+    AS
+    SELECT ...
+    ');
+    """);
+```
+
+Use the same pattern for `CREATE PROCEDURE`, `CREATE FUNCTION`, and `CREATE TRIGGER` statements in raw migration SQL.
+
 This script-first pattern is usually simpler than having SqlClone dynamically load a referenced `DbContext` and call `Migrate()` itself, because it keeps SqlClone decoupled from application assemblies, runtime versions, and design-time `DbContext` wiring.
 
 Ordering notes:
