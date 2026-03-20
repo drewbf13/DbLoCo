@@ -20,6 +20,7 @@ public sealed class MigrationPlan
 {
     public bool Enabled { get; init; }
     public string GitRepository { get; init; } = string.Empty;
+    public string LocalRepositoryPath { get; init; } = string.Empty;
     public string Branch { get; init; } = string.Empty;
     public string BuildCommand { get; init; } = string.Empty;
     public string WorkingDirectory { get; init; } = string.Empty;

@@ -20,6 +20,7 @@ public sealed class OptionsBindingTests
                 ["Clone:Restore:AzureBackup:SqlCredentialName"] = "CloneCred",
                 ["Clone:Migration:Enabled"] = "true",
                 ["Clone:Migration:GitRepository"] = "https://example.com/repo.git",
+                ["Clone:Migration:LocalRepositoryPath"] = "C:\\repos\\migrations",
                 ["Clone:Migration:Branch"] = "dev",
                 ["Clone:Migration:BuildCommand"] = "dotnet run",
                 ["Clone:Seed:Enabled"] = "true",
@@ -40,6 +41,7 @@ public sealed class OptionsBindingTests
         options.Restore.AzureBackup.BackupUrlTemplate.Should().Contain("{database}");
         options.Restore.AzureBackup.SqlCredentialName.Should().Be("CloneCred");
         options.Migration.Enabled.Should().BeTrue();
+        options.Migration.LocalRepositoryPath.Should().Be("C:\\repos\\migrations");
         options.Migration.Branch.Should().Be("dev");
         options.Seed.Enabled.Should().BeTrue();
         options.Seed.Tables.Should().ContainSingle();

@@ -21,6 +21,7 @@ public sealed class ClonePlanFactoryTests
             {
                 Enabled = true,
                 GitRepository = "https://example.com/db.git",
+                LocalRepositoryPath = "",
                 Branch = "feature/seed",
                 BuildCommand = "dotnet run"
             },
@@ -49,6 +50,7 @@ public sealed class ClonePlanFactoryTests
         plan.LinkedServers.Should().ContainSingle(ls => ls.Name == "REMOTE1");
         plan.Migration.Enabled.Should().BeTrue();
         plan.Migration.Branch.Should().Be("feature/seed");
+        plan.Migration.LocalRepositoryPath.Should().BeEmpty();
         plan.SeedTables.Should().HaveCount(2);
         plan.SeedTables[0].Table.Should().Be("AAFirst");
         plan.SeedTables[0].Order.Should().Be(10);

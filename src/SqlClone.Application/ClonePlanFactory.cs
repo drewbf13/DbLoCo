@@ -19,6 +19,7 @@ public sealed class ClonePlanFactory : IClonePlanFactory
             {
                 Enabled = options.Migration.Enabled,
                 GitRepository = options.Migration.GitRepository,
+                LocalRepositoryPath = options.Migration.LocalRepositoryPath,
                 Branch = options.Migration.Branch,
                 BuildCommand = options.Migration.BuildCommand,
                 WorkingDirectory = options.Migration.WorkingDirectory
