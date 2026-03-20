@@ -46,6 +46,7 @@ Important settings:
 - `Clone:Migration:Enabled` / (`GitRepository` or `LocalRepositoryPath`) / `Branch` / `BuildCommand`
 - `Clone:Seed:Enabled` / `SourceDatabase` / `Tables`
 - `Clone:LinkedServers:Definitions`
+  - Optional SQL auth mapping per linked server: `UserId` + `Password`
 - `Clone:PostClone:ScriptFolders`
 
 ## Docker + SQL Server notes
@@ -212,7 +213,6 @@ dotnet run --project src/SqlClone.Console -- teardown
 - No login/user remapping workflow
 - No secret vault integration
 - No parallel restore pipeline
-- No linked server login mappings
 
 ## Next steps
 

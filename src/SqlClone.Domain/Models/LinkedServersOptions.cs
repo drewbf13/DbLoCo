@@ -12,6 +12,8 @@ public sealed class LinkedServerDefinition
     public string Provider { get; set; } = "MSOLEDBSQL";
     public string DataSource { get; set; } = string.Empty;
     public string? Catalog { get; set; }
+    public string? UserId { get; set; }
+    public string? Password { get; set; }
     public bool Rpc { get; set; } = true;
     public bool RpcOut { get; set; } = true;
     public bool DataAccess { get; set; } = true;
