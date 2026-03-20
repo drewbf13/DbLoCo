@@ -23,7 +23,9 @@ public sealed class GitDatabaseMigrationRunner : IDatabaseMigrationRunner
 
         if (string.IsNullOrWhiteSpace(migration.BuildCommand))
         {
-            throw new InvalidOperationException("Migration is enabled but BuildCommand is not configured.");
+            throw new InvalidOperationException(
+                "Migration is enabled but BuildCommand is not configured. " +
+                "Set it to a command that applies migrations directly, or to a command chain that generates a SQL script and executes it.");
         }
 
         var hasGitRepository = !string.IsNullOrWhiteSpace(migration.GitRepository);
@@ -73,11 +75,11 @@ public sealed class GitDatabaseMigrationRunner : IDatabaseMigrationRunner
             await RunShellCommandAsync(migration.BuildCommand, runDirectory, cancellationToken);
             if (hasGitRepository)
             {
-                _logger.LogInformation("Migration build command completed from {Repository} ({Branch})", migration.GitRepository, migration.Branch);
+                _logger.LogInformation("Migration command completed from {Repository} ({Branch})", migration.GitRepository, migration.Branch);
             }
             else
             {
-                _logger.LogInformation("Migration build command completed from local repository path {RepositoryPath}", repositoryRoot);
+                _logger.LogInformation("Migration command completed from local repository path {RepositoryPath}", repositoryRoot);
             }
         }
         finally
