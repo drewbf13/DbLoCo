@@ -28,10 +28,34 @@ public sealed class SqlTableSeeder : ITableSeeder
             cancellationToken.ThrowIfCancellationRequested();
 
             var levelTasks = dependencyLevel
-                .Select(table => SeedTableAsync(table, cancellationToken))
+                .Select(table => SeedTableWithWarningAsync(table, cancellationToken))
                 .ToArray();
 
             await Task.WhenAll(levelTasks);
+        }
+    }
+
+    private async Task SeedTableWithWarningAsync(SeedTablePlan table, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await SeedTableAsync(table, cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Skipping table {SourceDatabase}.{Schema}.{Table} -> {TargetDatabase}.{Schema}.{Table} after seed failure.",
+                table.SourceDatabase,
+                table.Schema,
+                table.Table,
+                table.TargetDatabase,
+                table.Schema,
+                table.Table);
         }
     }
 
@@ -61,6 +85,7 @@ public sealed class SqlTableSeeder : ITableSeeder
         await using var reader = await sourceCommand.ExecuteReaderAsync(cancellationToken);
         var primaryKeyColumns = await LoadPrimaryKeyColumnListAsync(target, table, cancellationToken);
         var identityColumns = await LoadIdentityColumnListAsync(target, table, cancellationToken);
+        var nonNullableColumns = await LoadNonNullableColumnListAsync(target, table, cancellationToken);
         var includesIdentityColumns = columnList.Any(c => identityColumns.Contains(c, StringComparer.OrdinalIgnoreCase));
         var useMergeStrategy = table.TruncateTarget && primaryKeyColumns.Count > 0;
 
@@ -77,7 +102,7 @@ public sealed class SqlTableSeeder : ITableSeeder
                 await bulkCopy.WriteToServerAsync(reader, cancellationToken);
             }
 
-            var mergeSql = BuildMergeSql(destinationName, tempTableName, columnList, primaryKeyColumns);
+            var mergeSql = BuildMergeSql(destinationName, tempTableName, columnList, primaryKeyColumns, nonNullableColumns);
             if (includesIdentityColumns)
             {
                 mergeSql = WrapWithIdentityInsert(destinationName, mergeSql);
@@ -189,6 +214,30 @@ WHERE s.name = @schema
         return columns;
     }
 
+    private static async Task<List<string>> LoadNonNullableColumnListAsync(SqlConnection target, SeedTablePlan table, CancellationToken cancellationToken)
+    {
+        const string sql = @"
+SELECT COLUMN_NAME
+FROM INFORMATION_SCHEMA.COLUMNS
+WHERE TABLE_SCHEMA = @schema
+  AND TABLE_NAME = @table
+  AND IS_NULLABLE = 'NO';";
+
+        await using var command = target.CreateCommand();
+        command.CommandText = sql;
+        command.Parameters.AddWithValue("@schema", table.Schema);
+        command.Parameters.AddWithValue("@table", table.Table);
+
+        var columns = new List<string>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            columns.Add(reader.GetString(0));
+        }
+
+        return columns;
+    }
+
     private static SqlBulkCopy CreateBulkCopy(SqlConnection target, string destination, IEnumerable<string> columns, bool keepIdentity)
     {
         var options = keepIdentity ? SqlBulkCopyOptions.KeepIdentity : SqlBulkCopyOptions.Default;
@@ -210,7 +259,8 @@ WHERE s.name = @schema
         string destinationName,
         string sourceName,
         IReadOnlyList<string> columnList,
-        IReadOnlyList<string> primaryKeyColumns)
+        IReadOnlyList<string> primaryKeyColumns,
+        IReadOnlyList<string> nonNullableColumns)
     {
         static string Bracket(string column) => $"[{EscapeIdentifier(column)}]";
 
@@ -223,6 +273,13 @@ WHERE s.name = @schema
             ? $"WHEN MATCHED THEN UPDATE SET {string.Join(", ", nonPrimaryKeyColumns.Select(c => $"target.{Bracket(c)} = COALESCE(source.{Bracket(c)}, target.{Bracket(c)})"))}"
             : string.Empty;
 
+        var requiredInsertColumns = columnList
+            .Where(c => nonNullableColumns.Contains(c, StringComparer.OrdinalIgnoreCase))
+            .ToList();
+        var insertPredicate = requiredInsertColumns.Count > 0
+            ? $" AND {string.Join(" AND ", requiredInsertColumns.Select(c => $"source.{Bracket(c)} IS NOT NULL"))}"
+            : string.Empty;
+
         var insertColumns = string.Join(", ", columnList.Select(Bracket));
         var insertValues = string.Join(", ", columnList.Select(c => $"source.{Bracket(c)}"));
 
@@ -231,7 +288,7 @@ MERGE {destinationName} AS target
 USING {sourceName} AS source
     ON {onClause}
 {updateClause}
-WHEN NOT MATCHED BY TARGET THEN
+WHEN NOT MATCHED BY TARGET{insertPredicate} THEN
     INSERT ({insertColumns})
     VALUES ({insertValues});";
     }
