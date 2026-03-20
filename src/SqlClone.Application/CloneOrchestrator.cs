@@ -56,10 +56,9 @@ public sealed class CloneOrchestrator : ICloneOrchestrator
             await _materializer.MaterializeAsync(database, cancellationToken);
         }
 
+        await _linkedServers.ApplyAsync(plan.LinkedServers, cancellationToken);
         await _migrationRunner.RunAsync(plan.Migration, cancellationToken);
         await _tableSeeder.SeedAsync(plan.SeedTables, cancellationToken);
-
-        await _linkedServers.ApplyAsync(plan.LinkedServers, cancellationToken);
         await _postClone.RunAsync(cancellationToken);
 
         var validation = await _validator.ValidateAsync(cancellationToken);
