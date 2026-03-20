@@ -47,30 +47,47 @@ public sealed class SqlTableSeeder : ITableSeeder
         }
 
         var escapedColumns = string.Join(", ", columnList.Select(c => $"[{EscapeIdentifier(c)}]"));
-
-        if (table.TruncateTarget)
-        {
-            await _sql.ExecuteNonQueryAsync(target, $"TRUNCATE TABLE {destinationName};", cancellationToken);
-        }
-
         var sourceQuery = $"SELECT {escapedColumns} FROM {destinationName};";
         await using var sourceCommand = source.CreateCommand();
         sourceCommand.CommandText = sourceQuery;
         sourceCommand.CommandTimeout = 300;
 
         await using var reader = await sourceCommand.ExecuteReaderAsync(cancellationToken);
-        using var bulkCopy = new SqlBulkCopy(target)
-        {
-            DestinationTableName = destinationName,
-            BulkCopyTimeout = 600
-        };
+        var primaryKeyColumns = await LoadPrimaryKeyColumnListAsync(target, table, cancellationToken);
+        var useMergeStrategy = table.TruncateTarget && primaryKeyColumns.Count > 0;
 
-        foreach (var col in columnList)
+        if (useMergeStrategy)
         {
-            bulkCopy.ColumnMappings.Add(col, col);
+            var tempTableName = $"#Seed_{Guid.NewGuid():N}";
+            await _sql.ExecuteNonQueryAsync(
+                target,
+                $"SELECT TOP (0) {escapedColumns} INTO {tempTableName} FROM {destinationName};",
+                cancellationToken);
+
+            using (var bulkCopy = CreateBulkCopy(target, tempTableName, columnList))
+            {
+                await bulkCopy.WriteToServerAsync(reader, cancellationToken);
+            }
+
+            var mergeSql = BuildMergeSql(destinationName, tempTableName, columnList, primaryKeyColumns);
+            await _sql.ExecuteNonQueryAsync(target, mergeSql, cancellationToken);
+            await _sql.ExecuteNonQueryAsync(target, $"DROP TABLE {tempTableName};", cancellationToken);
         }
+        else
+        {
+            if (table.TruncateTarget)
+            {
+                _logger.LogWarning(
+                    "Table {TargetDatabase}.{Schema}.{Table} requested truncate-style seed but has no primary key. Falling back to TRUNCATE + INSERT.",
+                    table.TargetDatabase,
+                    table.Schema,
+                    table.Table);
+                await _sql.ExecuteNonQueryAsync(target, $"TRUNCATE TABLE {destinationName};", cancellationToken);
+            }
 
-        await bulkCopy.WriteToServerAsync(reader, cancellationToken);
+            using var bulkCopy = CreateBulkCopy(target, destinationName, columnList);
+            await bulkCopy.WriteToServerAsync(reader, cancellationToken);
+        }
 
         _logger.LogInformation(
             "Seeded {Database}.{Schema}.{Table} into {TargetDatabase}.{Schema}.{Table}",
@@ -103,6 +120,81 @@ ORDER BY ORDINAL_POSITION;";
         }
 
         return columns;
+    }
+
+    private static async Task<List<string>> LoadPrimaryKeyColumnListAsync(SqlConnection target, SeedTablePlan table, CancellationToken cancellationToken)
+    {
+        const string sql = @"
+SELECT k.COLUMN_NAME
+FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS c
+JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE k
+    ON c.CONSTRAINT_NAME = k.CONSTRAINT_NAME
+   AND c.TABLE_SCHEMA = k.TABLE_SCHEMA
+   AND c.TABLE_NAME = k.TABLE_NAME
+WHERE c.CONSTRAINT_TYPE = 'PRIMARY KEY'
+  AND c.TABLE_SCHEMA = @schema
+  AND c.TABLE_NAME = @table
+ORDER BY k.ORDINAL_POSITION;";
+
+        await using var command = target.CreateCommand();
+        command.CommandText = sql;
+        command.Parameters.AddWithValue("@schema", table.Schema);
+        command.Parameters.AddWithValue("@table", table.Table);
+
+        var columns = new List<string>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            columns.Add(reader.GetString(0));
+        }
+
+        return columns;
+    }
+
+    private static SqlBulkCopy CreateBulkCopy(SqlConnection target, string destination, IEnumerable<string> columns)
+    {
+        var bulkCopy = new SqlBulkCopy(target)
+        {
+            DestinationTableName = destination,
+            BulkCopyTimeout = 600
+        };
+
+        foreach (var col in columns)
+        {
+            bulkCopy.ColumnMappings.Add(col, col);
+        }
+
+        return bulkCopy;
+    }
+
+    private static string BuildMergeSql(
+        string destinationName,
+        string sourceName,
+        IReadOnlyList<string> columnList,
+        IReadOnlyList<string> primaryKeyColumns)
+    {
+        static string Bracket(string column) => $"[{EscapeIdentifier(column)}]";
+
+        var onClause = string.Join(
+            " AND ",
+            primaryKeyColumns.Select(c => $"target.{Bracket(c)} = source.{Bracket(c)}"));
+
+        var nonPrimaryKeyColumns = columnList.Where(c => !primaryKeyColumns.Contains(c, StringComparer.OrdinalIgnoreCase)).ToList();
+        var updateClause = nonPrimaryKeyColumns.Count > 0
+            ? $"WHEN MATCHED THEN UPDATE SET {string.Join(", ", nonPrimaryKeyColumns.Select(c => $"target.{Bracket(c)} = source.{Bracket(c)}"))}"
+            : string.Empty;
+
+        var insertColumns = string.Join(", ", columnList.Select(Bracket));
+        var insertValues = string.Join(", ", columnList.Select(c => $"source.{Bracket(c)}"));
+
+        return $@"
+MERGE {destinationName} AS target
+USING {sourceName} AS source
+    ON {onClause}
+{updateClause}
+WHEN NOT MATCHED BY TARGET THEN
+    INSERT ({insertColumns})
+    VALUES ({insertValues});";
     }
 
     private static string EscapeIdentifier(string value) => value.Replace("]", "]]", StringComparison.Ordinal);
