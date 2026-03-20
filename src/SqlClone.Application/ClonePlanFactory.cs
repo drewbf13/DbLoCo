@@ -32,11 +32,11 @@ public sealed class ClonePlanFactory : IClonePlanFactory
                 Table = table.Table,
                 TruncateTarget = table.TruncateTarget,
                 Order = table.Order,
-                GroupKey = table.GroupKey > 0 ? table.GroupKey : table.Order
+                GroupKey = table.GroupKey > 0 ? table.GroupKey : 1
             })
             .Where(table => !string.IsNullOrWhiteSpace(table.SourceDatabase) && !string.IsNullOrWhiteSpace(table.TargetDatabase) && !string.IsNullOrWhiteSpace(table.Table))
-            .OrderBy(table => table.GroupKey)
-            .ThenBy(table => table.Order)
+            .OrderBy(table => table.Order)
+            .ThenBy(table => table.GroupKey)
             .ThenBy(table => table.Schema)
             .ThenBy(table => table.Table)
             .ToList()

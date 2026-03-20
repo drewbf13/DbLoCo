@@ -60,6 +60,7 @@ public sealed class SourceInspector : ISourceInspector
         var tables = await GetUserTablesAsync(connection, cancellationToken);
         var foreignKeyDependencies = await GetForeignKeyDependenciesAsync(connection, cancellationToken);
         var dependencyGroups = TopologicalGroupTables(tables, foreignKeyDependencies);
+        var domainGroupKeys = BuildDomainGroupKeys(tables);
 
         var seedTables = dependencyGroups
             .SelectMany((group, groupIndex) => group
@@ -71,7 +72,7 @@ public sealed class SourceInspector : ISourceInspector
                     Schema = table.Schema,
                     Table = table.Table,
                     TruncateTarget = truncateTarget,
-                    GroupKey = groupIndex + 1,
+                    GroupKey = domainGroupKeys[table.Schema],
                     Order = (groupIndex + 1) * 10
                 }))
             .ToList();
@@ -212,6 +213,16 @@ public sealed class SourceInspector : ISourceInspector
         }
 
         return groups;
+    }
+
+    private static Dictionary<string, int> BuildDomainGroupKeys(IReadOnlyList<TableNode> tables)
+    {
+        return tables
+            .Select(table => table.Schema)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(schema => schema, StringComparer.OrdinalIgnoreCase)
+            .Select((schema, index) => new { schema, key = index + 1 })
+            .ToDictionary(item => item.schema, item => item.key, StringComparer.OrdinalIgnoreCase);
     }
 
     private sealed record TableNode(string Schema, string Table)

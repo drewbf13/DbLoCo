@@ -23,7 +23,7 @@ public sealed class SqlTableSeeder : ITableSeeder
 
     public async Task SeedAsync(IReadOnlyList<SeedTablePlan> tables, CancellationToken cancellationToken)
     {
-        foreach (var dependencyLevel in tables.GroupBy(table => table.GroupKey > 0 ? table.GroupKey : table.Order).OrderBy(group => group.Key))
+        foreach (var dependencyLevel in tables.GroupBy(table => table.Order > 0 ? table.Order : table.GroupKey).OrderBy(group => group.Key))
         {
             cancellationToken.ThrowIfCancellationRequested();
 
@@ -220,7 +220,7 @@ WHERE s.name = @schema
 
         var nonPrimaryKeyColumns = columnList.Where(c => !primaryKeyColumns.Contains(c, StringComparer.OrdinalIgnoreCase)).ToList();
         var updateClause = nonPrimaryKeyColumns.Count > 0
-            ? $"WHEN MATCHED THEN UPDATE SET {string.Join(", ", nonPrimaryKeyColumns.Select(c => $"target.{Bracket(c)} = source.{Bracket(c)}"))}"
+            ? $"WHEN MATCHED THEN UPDATE SET {string.Join(", ", nonPrimaryKeyColumns.Select(c => $"target.{Bracket(c)} = COALESCE(source.{Bracket(c)}, target.{Bracket(c)})"))}"
             : string.Empty;
 
         var insertColumns = string.Join(", ", columnList.Select(Bracket));
