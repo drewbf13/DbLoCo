@@ -29,6 +29,7 @@ public sealed class OptionsBindingTests
                 ["Clone:Seed:Tables:0:Schema"] = "dbo",
                 ["Clone:Seed:Tables:0:TruncateTarget"] = "true",
                 ["Clone:Seed:Tables:0:Order"] = "20",
+                ["Clone:Seed:Tables:0:GroupKey"] = "2",
                 ["Clone:LinkedServers:Definitions:0:Name"] = "REMOTEDEV",
                 ["Clone:LinkedServers:Definitions:0:DataSource"] = "remote-server.example.local",
                 ["Clone:LinkedServers:Definitions:0:UserId"] = "linked_user",
@@ -50,6 +51,7 @@ public sealed class OptionsBindingTests
         options.Seed.Enabled.Should().BeTrue();
         options.Seed.Tables.Should().ContainSingle();
         options.Seed.Tables[0].Order.Should().Be(20);
+        options.Seed.Tables[0].GroupKey.Should().Be(2);
         options.LinkedServers.Definitions.Should().ContainSingle();
         options.LinkedServers.Definitions[0].UserId.Should().Be("linked_user");
         options.LinkedServers.Definitions[0].Password.Should().Be("linked_password");

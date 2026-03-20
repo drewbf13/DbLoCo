@@ -59,18 +59,21 @@ public sealed class SourceInspector : ISourceInspector
 
         var tables = await GetUserTablesAsync(connection, cancellationToken);
         var foreignKeyDependencies = await GetForeignKeyDependenciesAsync(connection, cancellationToken);
-        var orderedTables = TopologicalOrderTables(tables, foreignKeyDependencies);
+        var dependencyGroups = TopologicalGroupTables(tables, foreignKeyDependencies);
 
-        var seedTables = orderedTables
-            .Select((table, index) => new SeedTableOptions
-            {
-                SourceDatabase = sourceDatabase,
-                TargetDatabase = targetDatabase,
-                Schema = table.Schema,
-                Table = table.Table,
-                TruncateTarget = truncateTarget,
-                Order = (index + 1) * 10
-            })
+        var seedTables = dependencyGroups
+            .SelectMany((group, groupIndex) => group
+                .OrderBy(table => table.Key, StringComparer.OrdinalIgnoreCase)
+                .Select(table => new SeedTableOptions
+                {
+                    SourceDatabase = sourceDatabase,
+                    TargetDatabase = targetDatabase,
+                    Schema = table.Schema,
+                    Table = table.Table,
+                    TruncateTarget = truncateTarget,
+                    GroupKey = groupIndex + 1,
+                    Order = (groupIndex + 1) * 10
+                }))
             .ToList();
 
         var payload = new
@@ -137,7 +140,7 @@ public sealed class SourceInspector : ISourceInspector
         return dependencies;
     }
 
-    private static List<TableNode> TopologicalOrderTables(
+    private static List<List<TableNode>> TopologicalGroupTables(
         IReadOnlyList<TableNode> tables,
         IReadOnlyList<ForeignKeyDependency> dependencies)
     {
@@ -165,41 +168,50 @@ public sealed class SourceInspector : ISourceInspector
             }
         }
 
-        var queue = new PriorityQueue<TableNode, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var table in tables.Where(t => inDegree[t.Key] == 0))
-        {
-            queue.Enqueue(table, table.Key);
-        }
+        var remainingKeys = new HashSet<string>(tableKeyLookup.Keys, StringComparer.OrdinalIgnoreCase);
+        var ready = new SortedSet<string>(
+            tables.Where(t => inDegree[t.Key] == 0).Select(t => t.Key),
+            StringComparer.OrdinalIgnoreCase);
 
-        var ordered = new List<TableNode>(tables.Count);
-        while (queue.Count > 0)
-        {
-            var current = queue.Dequeue();
-            ordered.Add(current);
+        var groups = new List<List<TableNode>>();
 
-            foreach (var dependentKey in outgoing[current.Key].OrderBy(k => k, StringComparer.OrdinalIgnoreCase))
+        while (ready.Count > 0)
+        {
+            var currentLevelKeys = ready.ToList();
+            ready.Clear();
+
+            var currentLevel = currentLevelKeys
+                .Select(key => tableKeyLookup[key])
+                .ToList();
+
+            groups.Add(currentLevel);
+
+            foreach (var currentKey in currentLevelKeys)
             {
-                inDegree[dependentKey]--;
-                if (inDegree[dependentKey] == 0)
+                remainingKeys.Remove(currentKey);
+
+                foreach (var dependentKey in outgoing[currentKey].OrderBy(k => k, StringComparer.OrdinalIgnoreCase))
                 {
-                    queue.Enqueue(tableKeyLookup[dependentKey], dependentKey);
+                    inDegree[dependentKey]--;
+                    if (inDegree[dependentKey] == 0)
+                    {
+                        ready.Add(dependentKey);
+                    }
                 }
             }
         }
 
-        if (ordered.Count == tables.Count)
+        if (remainingKeys.Count > 0)
         {
-            return ordered;
+            // Cycles (including mutual references) cannot be fully topologically sorted.
+            // Keep deterministic output and avoid parallel writes for unresolved tables.
+            foreach (var unresolvedKey in remainingKeys.OrderBy(k => k, StringComparer.OrdinalIgnoreCase))
+            {
+                groups.Add([tableKeyLookup[unresolvedKey]]);
+            }
         }
 
-        // Cycles (including mutual references) cannot be fully topologically sorted.
-        // Keep deterministic output by appending unresolved tables alphabetically.
-        var unresolved = tables
-            .Where(t => ordered.All(o => !o.Key.Equals(t.Key, StringComparison.OrdinalIgnoreCase)))
-            .OrderBy(t => t.Key, StringComparer.OrdinalIgnoreCase);
-
-        ordered.AddRange(unresolved);
-        return ordered;
+        return groups;
     }
 
     private sealed record TableNode(string Schema, string Table)
