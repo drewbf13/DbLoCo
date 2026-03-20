@@ -199,8 +199,8 @@ This script-first pattern is usually simpler than having SqlClone dynamically lo
 Ordering notes:
 
 - **Migration ordering** is controlled by your migration tool/repo (via `BuildCommand`). SqlClone invokes that command once.
-- **Seed grouping** is controlled by `Clone:Seed:Tables[*]:GroupKey` (ascending). Tables in the same group are seeded in parallel.
-- **Seed ordering inside a group** uses `Clone:Seed:Tables[*]:Order` (ascending), then schema/table name for deterministic ties.
+- **Seed ordering** is controlled by `Clone:Seed:Tables[*]:Order` (ascending). Tables in the same order value are seeded in parallel.
+- **Seed grouping metadata** is provided by `Clone:Seed:Tables[*]:GroupKey` (for example domain/schema lanes in generated config) and is used as a deterministic tie-breaker.
 - **Post-clone scripts** still run in lexical file name order.
 
 ## Commands
@@ -214,7 +214,7 @@ dotnet run --project src/SqlClone.Console -- validate
 dotnet run --project src/SqlClone.Console -- teardown
 ```
 
-`generate-seed-config` emits a JSON `Seed` section with `GroupKey` (parallel dependency levels) and `Order` values computed from foreign-key dependencies (parents before children). Use `--target-database` to override target DB name and `--truncate-target false` if you want generated entries to keep existing rows.
+`generate-seed-config` emits a JSON `Seed` section with `Order` values computed from foreign-key dependency levels (parents before children), plus `GroupKey` values grouped by schema/domain to keep related tables together while still maximizing per-level parallelism. Use `--target-database` to override target DB name and `--truncate-target false` if you want generated entries to keep existing rows.
 
 ## Known v1 limitations
 
