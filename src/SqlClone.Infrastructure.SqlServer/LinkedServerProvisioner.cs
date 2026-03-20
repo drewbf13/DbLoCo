@@ -40,6 +40,30 @@ public sealed class LinkedServerProvisioner : ILinkedServerProvisioner
     {
         static string B(bool value) => value ? "true" : "false";
         string esc(string value) => value.Replace("'", "''", StringComparison.Ordinal);
+        var hasSqlAuth = !string.IsNullOrWhiteSpace(linkedServer.UserId) && !string.IsNullOrWhiteSpace(linkedServer.Password);
+        var loginSql = hasSqlAuth
+            ? $"""
+            
+            IF EXISTS
+            (
+                SELECT 1
+                FROM sys.linked_logins ll
+                INNER JOIN sys.servers s ON s.server_id = ll.server_id
+                WHERE s.name = N'{esc(linkedServer.Name)}'
+                  AND ll.local_principal_id = 0
+            )
+            BEGIN
+                EXEC master.dbo.sp_droplinkedsrvlogin @rmtsrvname = N'{esc(linkedServer.Name)}', @locallogin = NULL;
+            END
+            
+            EXEC master.dbo.sp_addlinkedsrvlogin
+                @rmtsrvname = N'{esc(linkedServer.Name)}',
+                @useself = N'False',
+                @locallogin = NULL,
+                @rmtuser = N'{esc(linkedServer.UserId!)}',
+                @rmtpassword = N'{esc(linkedServer.Password!)}';
+            """
+            : string.Empty;
 
         return $"""
             IF NOT EXISTS (SELECT 1 FROM sys.servers WHERE name = N'{esc(linkedServer.Name)}')
@@ -55,6 +79,7 @@ public sealed class LinkedServerProvisioner : ILinkedServerProvisioner
             EXEC master.dbo.sp_serveroption @server=N'{esc(linkedServer.Name)}', @optname=N'rpc', @optvalue=N'{B(linkedServer.Rpc)}';
             EXEC master.dbo.sp_serveroption @server=N'{esc(linkedServer.Name)}', @optname=N'rpc out', @optvalue=N'{B(linkedServer.RpcOut)}';
             EXEC master.dbo.sp_serveroption @server=N'{esc(linkedServer.Name)}', @optname=N'data access', @optvalue=N'{B(linkedServer.DataAccess)}';
+            {loginSql}
             """;
     }
 }
