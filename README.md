@@ -43,7 +43,7 @@ Important settings:
 - `Clone:Restore:AzureBackup:SharedAccessSignature` (optional, auto-generated with current user identity when omitted)
 - `Clone:Restore:AzureBackup:SqlCredentialName`
 - `Clone:Restore:Databases`
-- `Clone:Migration:Enabled` / `GitRepository` / `Branch` / `BuildCommand`
+- `Clone:Migration:Enabled` / (`GitRepository` or `LocalRepositoryPath`) / `Branch` / `BuildCommand`
 - `Clone:Seed:Enabled` / `SourceDatabase` / `Tables`
 - `Clone:LinkedServers:Definitions`
 - `Clone:PostClone:ScriptFolders`
@@ -146,7 +146,7 @@ For this project today, BACPAC/data-movement execution is not automated in `SqlC
 If you can build schema migrations from source code, configure SqlClone like this:
 
 1. Set `Clone:Restore:Materializer` to `CreateEmpty` (or `NoOp`) so the target DB exists without depending on native backup restore.
-2. Enable `Clone:Migration` with the git repo + branch + migration build command.
+2. Enable `Clone:Migration` with either a git repo + branch **or** a local repository path + migration build command.
 3. Enable `Clone:Seed` and list tables to copy from Azure SQL source into your local DB after migration runs.
 
 Example:
@@ -155,6 +155,7 @@ Example:
 "Migration": {
   "Enabled": true,
   "GitRepository": "https://github.com/your-org/your-db-migrations.git",
+  "LocalRepositoryPath": "",
   "Branch": "main",
   "BuildCommand": "dotnet run --project tools/DbMigrate -- --connection \"Server=localhost,14333;Database=AppDb;User Id=sa;Password=YourStrong!Passw0rd;Encrypt=False;TrustServerCertificate=True\"",
   "WorkingDirectory": ""
@@ -176,6 +177,8 @@ Example:
 ```
 
 The clone sequence becomes: start container -> materialize DB -> run migration build from configured git branch -> seed configured tables from Azure SQL source -> linked servers/post-clone scripts/validation.
+
+If your migrations project is already on your machine, set `Clone:Migration:LocalRepositoryPath` and leave `GitRepository` blank. SqlClone will run `BuildCommand` directly from that local path (plus `WorkingDirectory`, if set) and skip git clone.
 
 Ordering notes:
 

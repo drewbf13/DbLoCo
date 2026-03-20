@@ -21,21 +21,49 @@ public sealed class GitDatabaseMigrationRunner : IDatabaseMigrationRunner
             return;
         }
 
-        if (string.IsNullOrWhiteSpace(migration.GitRepository) || string.IsNullOrWhiteSpace(migration.BuildCommand))
+        if (string.IsNullOrWhiteSpace(migration.BuildCommand))
         {
-            throw new InvalidOperationException("Migration is enabled but GitRepository/BuildCommand are not configured.");
+            throw new InvalidOperationException("Migration is enabled but BuildCommand is not configured.");
         }
 
-        var workRoot = Path.Combine(Path.GetTempPath(), "sqlclone-migration", Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(workRoot);
+        var hasGitRepository = !string.IsNullOrWhiteSpace(migration.GitRepository);
+        var hasLocalRepository = !string.IsNullOrWhiteSpace(migration.LocalRepositoryPath);
+        if (!hasGitRepository && !hasLocalRepository)
+        {
+            throw new InvalidOperationException("Migration is enabled but no repository source is configured. Set GitRepository or LocalRepositoryPath.");
+        }
+
+        if (hasGitRepository && hasLocalRepository)
+        {
+            throw new InvalidOperationException("Migration config is ambiguous. Configure either GitRepository or LocalRepositoryPath, not both.");
+        }
+
+        var workRoot = string.Empty;
+        var repositoryRoot = string.Empty;
+        var cleanupWorkRoot = false;
 
         try
         {
-            await RunProcessAsync("git", $"clone --depth 1 --branch {migration.Branch} {migration.GitRepository} .", workRoot, cancellationToken);
+            if (hasGitRepository)
+            {
+                workRoot = Path.Combine(Path.GetTempPath(), "sqlclone-migration", Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(workRoot);
+                cleanupWorkRoot = true;
+                repositoryRoot = workRoot;
+                await RunProcessAsync("git", $"clone --depth 1 --branch {migration.Branch} {migration.GitRepository} .", repositoryRoot, cancellationToken);
+            }
+            else
+            {
+                repositoryRoot = Path.GetFullPath(Environment.ExpandEnvironmentVariables(migration.LocalRepositoryPath));
+                if (!Directory.Exists(repositoryRoot))
+                {
+                    throw new DirectoryNotFoundException($"Migration local repository path not found: {repositoryRoot}");
+                }
+            }
 
             var runDirectory = string.IsNullOrWhiteSpace(migration.WorkingDirectory)
-                ? workRoot
-                : Path.Combine(workRoot, migration.WorkingDirectory);
+                ? repositoryRoot
+                : Path.Combine(repositoryRoot, migration.WorkingDirectory);
 
             if (!Directory.Exists(runDirectory))
             {
@@ -43,10 +71,22 @@ public sealed class GitDatabaseMigrationRunner : IDatabaseMigrationRunner
             }
 
             await RunShellCommandAsync(migration.BuildCommand, runDirectory, cancellationToken);
-            _logger.LogInformation("Migration build command completed from {Repository} ({Branch})", migration.GitRepository, migration.Branch);
+            if (hasGitRepository)
+            {
+                _logger.LogInformation("Migration build command completed from {Repository} ({Branch})", migration.GitRepository, migration.Branch);
+            }
+            else
+            {
+                _logger.LogInformation("Migration build command completed from local repository path {RepositoryPath}", repositoryRoot);
+            }
         }
         finally
         {
+            if (!cleanupWorkRoot || string.IsNullOrWhiteSpace(workRoot))
+            {
+                return;
+            }
+
             try
             {
                 Directory.Delete(workRoot, recursive: true);
