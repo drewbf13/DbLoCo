@@ -27,7 +27,7 @@ public sealed class SqlConnectionFactoryTests
 
         builder.Authentication.Should().Be(Microsoft.Data.SqlClient.SqlAuthenticationMethod.ActiveDirectoryPassword);
         builder.ColumnEncryptionSetting.Should().Be(Microsoft.Data.SqlClient.SqlConnectionColumnEncryptionSetting.Enabled);
-        builder.Encrypt.Should().BeTrue();
+        builder.Encrypt.Should().Be(true);
         builder.TrustServerCertificate.Should().BeFalse();
     }
 
@@ -53,7 +53,7 @@ public sealed class SqlConnectionFactoryTests
         var builder = new Microsoft.Data.SqlClient.SqlConnectionStringBuilder(connection.ConnectionString);
 
         builder.InitialCatalog.Should().Be("OtherDb");
-        builder.Encrypt.Should().BeTrue();
+        builder.Encrypt.Should().Be(true);
         builder.TrustServerCertificate.Should().BeFalse();
         builder.Pooling.Should().BeFalse();
         builder.ColumnEncryptionSetting.Should().Be(Microsoft.Data.SqlClient.SqlConnectionColumnEncryptionSetting.Enabled);

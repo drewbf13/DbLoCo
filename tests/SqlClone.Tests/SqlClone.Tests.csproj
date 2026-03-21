@@ -16,5 +16,6 @@
   <ItemGroup>
     <ProjectReference Include="../../src/SqlClone.Domain/SqlClone.Domain.csproj" />
     <ProjectReference Include="../../src/SqlClone.Application/SqlClone.Application.csproj" />
+    <ProjectReference Include="..\..\src\SqlClone.Infrastructure.SqlServer\SqlClone.Infrastructure.SqlServer.csproj" />
   </ItemGroup>
 </Project>
