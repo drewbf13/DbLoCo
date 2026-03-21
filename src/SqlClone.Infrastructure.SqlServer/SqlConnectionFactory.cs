@@ -29,15 +29,16 @@ public sealed class SqlConnectionFactory
 
     public SqlConnection CreateSourceConnection(string? initialCatalog = null)
     {
-        if (string.IsNullOrWhiteSpace(initialCatalog))
+        var builder = new SqlConnectionStringBuilder(_options.Source.ConnectionString);
+        if (!string.IsNullOrWhiteSpace(initialCatalog))
         {
-            return new SqlConnection(_options.Source.ConnectionString);
+            builder.InitialCatalog = initialCatalog;
         }
 
-        var builder = new SqlConnectionStringBuilder(_options.Source.ConnectionString)
+        if (_options.Source.EnableAlwaysEncrypted)
         {
-            InitialCatalog = initialCatalog
-        };
+            builder.ColumnEncryptionSetting = SqlConnectionColumnEncryptionSetting.Enabled;
+        }
 
         return new SqlConnection(builder.ConnectionString);
     }
