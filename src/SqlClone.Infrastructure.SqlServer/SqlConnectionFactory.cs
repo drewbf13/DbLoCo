@@ -29,6 +29,11 @@ public sealed class SqlConnectionFactory
 
     public SqlConnection CreateSourceConnection(string? initialCatalog = null)
     {
+        if (CanUseConfiguredSourceConnectionStringAsIs(initialCatalog))
+        {
+            return new SqlConnection(_options.Source.ConnectionString);
+        }
+
         var builder = new SqlConnectionStringBuilder(_options.Source.ConnectionString);
         if (!string.IsNullOrWhiteSpace(initialCatalog))
         {
@@ -56,5 +61,14 @@ public sealed class SqlConnectionFactory
         }
 
         return new SqlConnection(builder.ConnectionString);
+    }
+
+    private bool CanUseConfiguredSourceConnectionStringAsIs(string? initialCatalog)
+    {
+        return string.IsNullOrWhiteSpace(initialCatalog)
+            && !_options.Source.Encrypt.HasValue
+            && !_options.Source.TrustServerCertificate.HasValue
+            && !_options.Source.DisableConnectionPooling
+            && !_options.Source.EnableAlwaysEncrypted;
     }
 }
