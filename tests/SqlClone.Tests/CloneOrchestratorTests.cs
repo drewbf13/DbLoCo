@@ -15,6 +15,8 @@ public sealed class CloneOrchestratorTests
         var calls = new List<string>();
         var plan = new ClonePlan
         {
+            EnvironmentName = "Dev",
+            Materializer = "CreateEmpty",
             Databases = [new DatabaseClonePlan { Name = "AppDb" }],
             LinkedServers = [new LinkedServerDefinition { Name = "REMOTEDEV", DataSource = "remote" }],
             Migration = new MigrationPlan { Enabled = true, BuildCommand = "echo migrate" },
