@@ -7,6 +7,7 @@ namespace SqlClone.Infrastructure.SqlServer;
 
 public sealed class SqlTableSeeder : ITableSeeder
 {
+    private const int MaxConcurrentSeedOperationsPerLevel = 8;
     private const int MetadataQueryTimeoutSeconds = 180;
     private const int SeedSourceQueryTimeoutSeconds = 600;
 
@@ -30,11 +31,30 @@ public sealed class SqlTableSeeder : ITableSeeder
         {
             cancellationToken.ThrowIfCancellationRequested();
 
+            using var concurrencyGate = new SemaphoreSlim(MaxConcurrentSeedOperationsPerLevel);
             var levelTasks = dependencyLevel
-                .Select(table => SeedTableWithWarningAsync(table, cancellationToken))
+                .Select(table => SeedTableWithWarningThrottledAsync(table, concurrencyGate, cancellationToken))
                 .ToArray();
 
             await Task.WhenAll(levelTasks);
+        }
+    }
+
+
+    private async Task SeedTableWithWarningThrottledAsync(
+        SeedTablePlan table,
+        SemaphoreSlim concurrencyGate,
+        CancellationToken cancellationToken)
+    {
+        await concurrencyGate.WaitAsync(cancellationToken);
+
+        try
+        {
+            await SeedTableWithWarningAsync(table, cancellationToken);
+        }
+        finally
+        {
+            concurrencyGate.Release();
         }
     }
 
