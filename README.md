@@ -39,6 +39,8 @@ Important settings:
 - `Clone:Docker:SaPassword`
 - `Clone:Source:ConnectionString`
 - `Clone:Source:EnableAlwaysEncrypted` (set `true` when source tables use Always Encrypted columns)
+- `Clone:Source:Encrypt` / `Clone:Source:TrustServerCertificate` (optional overrides applied on top of the source connection string)
+- `Clone:Source:DisableConnectionPooling` (set `true` to test/mitigate TLS session reuse issues)
 - `Clone:Restore:Materializer` (`CreateEmpty`, `AzureBackup`, or `NoOp`)
 - `Clone:Restore:AzureBackup:BackupUrlTemplate`
 - `Clone:Restore:AzureBackup:SharedAccessSignature` (optional, auto-generated with current user identity when omitted)
@@ -211,6 +213,25 @@ This error is usually a **TLS transport/session** problem, not SQL table encrypt
 ```
 
 `EnableAlwaysEncrypted` sets SqlClient `Column Encryption Setting=Enabled` for source connections so supported encrypted column values can be read during seed operations.
+
+If you already have `Column Encryption Setting=Enabled` in the connection string and still see this SSL decrypt transport error, verify the machine can access the CMK provider (for example cert store/Key Vault) and that SQL auth/TLS transport settings are valid independently of Always Encrypted.
+
+4. If the same source endpoint intermittently fails only during repeated clone/seed reads, disable source connection pooling for diagnosis:
+
+```json
+"Source": {
+  "DisableConnectionPooling": true
+}
+```
+
+5. If you need to force TLS flags regardless of the base connection string, set:
+
+```json
+"Source": {
+  "Encrypt": true,
+  "TrustServerCertificate": false
+}
+```
 
 This script-first pattern is usually simpler than having SqlClone dynamically load a referenced `DbContext` and call `Migrate()` itself, because it keeps SqlClone decoupled from application assemblies, runtime versions, and design-time `DbContext` wiring.
 

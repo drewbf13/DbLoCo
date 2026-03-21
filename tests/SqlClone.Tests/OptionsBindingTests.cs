@@ -33,7 +33,10 @@ public sealed class OptionsBindingTests
                 ["Clone:LinkedServers:Definitions:0:Name"] = "REMOTEDEV",
                 ["Clone:LinkedServers:Definitions:0:DataSource"] = "remote-server.example.local",
                 ["Clone:LinkedServers:Definitions:0:UserId"] = "linked_user",
-                ["Clone:LinkedServers:Definitions:0:Password"] = "linked_password"
+                ["Clone:LinkedServers:Definitions:0:Password"] = "linked_password",
+                ["Clone:Source:Encrypt"] = "true",
+                ["Clone:Source:TrustServerCertificate"] = "false",
+                ["Clone:Source:DisableConnectionPooling"] = "true"
             })
             .Build();
 
@@ -55,5 +58,8 @@ public sealed class OptionsBindingTests
         options.LinkedServers.Definitions.Should().ContainSingle();
         options.LinkedServers.Definitions[0].UserId.Should().Be("linked_user");
         options.LinkedServers.Definitions[0].Password.Should().Be("linked_password");
+        options.Source.Encrypt.Should().BeTrue();
+        options.Source.TrustServerCertificate.Should().BeFalse();
+        options.Source.DisableConnectionPooling.Should().BeTrue();
     }
 }

@@ -7,6 +7,7 @@ namespace SqlClone.Infrastructure.SqlServer;
 
 public sealed class SourceInspector : ISourceInspector
 {
+    private const int MaxOpenAttempts = 3;
     private readonly SqlConnectionFactory _factory;
     private readonly ILogger<SourceInspector> _logger;
 
@@ -28,7 +29,7 @@ public sealed class SourceInspector : ISourceInspector
         var databases = new List<SourceDatabaseInfo>();
 
         await using var connection = _factory.CreateSourceConnection();
-        await connection.OpenAsync(cancellationToken);
+        await SqlClientTransientRetry.OpenWithRetryAsync(connection, MaxOpenAttempts, cancellationToken);
         await using var command = connection.CreateCommand();
         command.CommandText = Sql;
 
@@ -55,7 +56,7 @@ public sealed class SourceInspector : ISourceInspector
         CancellationToken cancellationToken)
     {
         await using var connection = _factory.CreateSourceConnection(sourceDatabase);
-        await connection.OpenAsync(cancellationToken);
+        await SqlClientTransientRetry.OpenWithRetryAsync(connection, MaxOpenAttempts, cancellationToken);
 
         var tables = await GetUserTablesAsync(connection, cancellationToken);
         var foreignKeyDependencies = await GetForeignKeyDependenciesAsync(connection, cancellationToken);
