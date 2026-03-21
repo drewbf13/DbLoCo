@@ -35,6 +35,21 @@ public sealed class SqlConnectionFactory
             builder.InitialCatalog = initialCatalog;
         }
 
+        if (_options.Source.Encrypt.HasValue)
+        {
+            builder.Encrypt = _options.Source.Encrypt.Value;
+        }
+
+        if (_options.Source.TrustServerCertificate.HasValue)
+        {
+            builder.TrustServerCertificate = _options.Source.TrustServerCertificate.Value;
+        }
+
+        if (_options.Source.DisableConnectionPooling)
+        {
+            builder.Pooling = false;
+        }
+
         if (_options.Source.EnableAlwaysEncrypted)
         {
             builder.ColumnEncryptionSetting = SqlConnectionColumnEncryptionSetting.Enabled;

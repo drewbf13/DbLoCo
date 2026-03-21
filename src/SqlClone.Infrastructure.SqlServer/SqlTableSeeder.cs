@@ -61,7 +61,7 @@ public sealed class SqlTableSeeder : ITableSeeder
 
     private async Task SeedTableWithWarningAsync(SeedTablePlan table, CancellationToken cancellationToken)
     {
-        var allowRetry = table.TruncateTarget;
+        const bool allowRetry = true;
 
         for (var attempt = 1; attempt <= MaxSeedAttempts; attempt++)
         {
@@ -76,8 +76,9 @@ public sealed class SqlTableSeeder : ITableSeeder
             {
                 throw;
             }
-            catch (Exception ex) when (allowRetry && attempt < MaxSeedAttempts && IsTransientTransportError(ex))
+            catch (Exception ex) when (allowRetry && attempt < MaxSeedAttempts && SqlClientTransientRetry.IsTransientTransportError(ex))
             {
+                SqlConnection.ClearAllPools();
                 var delay = TimeSpan.FromSeconds(Math.Pow(2, attempt - 1));
                 _logger.LogWarning(
                     ex,
@@ -122,28 +123,6 @@ public sealed class SqlTableSeeder : ITableSeeder
         }
     }
 
-    private static bool IsTransientTransportError(Exception exception)
-    {
-        if (exception is SqlException sqlException)
-        {
-            var message = sqlException.Message;
-            if (message.Contains("transport-level error", StringComparison.OrdinalIgnoreCase)
-                || message.Contains("SSL Provider", StringComparison.OrdinalIgnoreCase)
-                || message.Contains("could not be decrypted", StringComparison.OrdinalIgnoreCase))
-            {
-                return true;
-            }
-
-            if (sqlException.InnerException is System.ComponentModel.Win32Exception win32Exception
-                && win32Exception.NativeErrorCode == unchecked((int)0x80090330))
-            {
-                return true;
-            }
-        }
-
-        return exception.InnerException is not null && IsTransientTransportError(exception.InnerException);
-    }
-
     private async Task SeedTableAsync(SeedTablePlan table, CancellationToken cancellationToken)
     {
         var escapedSchema = EscapeIdentifier(table.Schema);
@@ -152,8 +131,8 @@ public sealed class SqlTableSeeder : ITableSeeder
 
         await using var source = _connectionFactory.CreateSourceConnection(table.SourceDatabase);
         await using var target = _connectionFactory.CreateTargetConnection(table.TargetDatabase);
-        await source.OpenAsync(cancellationToken);
-        await target.OpenAsync(cancellationToken);
+        await SqlClientTransientRetry.OpenWithRetryAsync(source, MaxSeedAttempts, cancellationToken);
+        await SqlClientTransientRetry.OpenWithRetryAsync(target, MaxSeedAttempts, cancellationToken);
 
         var computedColumns = await LoadComputedColumnListAsync(target, table, cancellationToken);
         var columnList = (await LoadColumnListAsync(source, table, cancellationToken))
