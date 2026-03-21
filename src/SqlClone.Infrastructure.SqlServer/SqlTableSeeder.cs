@@ -8,6 +8,8 @@ namespace SqlClone.Infrastructure.SqlServer;
 public sealed class SqlTableSeeder : ITableSeeder
 {
     private const int MaxConcurrentSeedOperationsPerLevel = 8;
+
+    private const int MaxConcurrentSeedOperationsPerLevel = 8;
     private const int MetadataQueryTimeoutSeconds = 180;
     private const int SeedSourceQueryTimeoutSeconds = 600;
 
