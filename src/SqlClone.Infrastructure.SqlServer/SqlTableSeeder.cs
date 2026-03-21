@@ -7,6 +7,9 @@ namespace SqlClone.Infrastructure.SqlServer;
 
 public sealed class SqlTableSeeder : ITableSeeder
 {
+    private const int MetadataQueryTimeoutSeconds = 180;
+    private const int SeedSourceQueryTimeoutSeconds = 600;
+
     private readonly SqlConnectionFactory _connectionFactory;
     private readonly SqlExecutionHelper _sql;
     private readonly ILogger<SqlTableSeeder> _logger;
@@ -90,7 +93,7 @@ public sealed class SqlTableSeeder : ITableSeeder
         var sourceQuery = $"SELECT {escapedColumns} FROM {destinationName};";
         await using var sourceCommand = source.CreateCommand();
         sourceCommand.CommandText = sourceQuery;
-        sourceCommand.CommandTimeout = 300;
+        sourceCommand.CommandTimeout = SeedSourceQueryTimeoutSeconds;
 
         await using var reader = await sourceCommand.ExecuteReaderAsync(cancellationToken);
         var primaryKeyColumns = await LoadPrimaryKeyColumnListAsync(target, table, cancellationToken);
@@ -167,6 +170,7 @@ ORDER BY ORDINAL_POSITION;";
 
         await using var command = source.CreateCommand();
         command.CommandText = sql;
+        command.CommandTimeout = MetadataQueryTimeoutSeconds;
         command.Parameters.AddWithValue("@schema", table.Schema);
         command.Parameters.AddWithValue("@table", table.Table);
 
@@ -196,6 +200,7 @@ ORDER BY k.ORDINAL_POSITION;";
 
         await using var command = target.CreateCommand();
         command.CommandText = sql;
+        command.CommandTimeout = MetadataQueryTimeoutSeconds;
         command.Parameters.AddWithValue("@schema", table.Schema);
         command.Parameters.AddWithValue("@table", table.Table);
 
@@ -221,6 +226,7 @@ WHERE s.name = @schema
 
         await using var command = target.CreateCommand();
         command.CommandText = sql;
+        command.CommandTimeout = MetadataQueryTimeoutSeconds;
         command.Parameters.AddWithValue("@schema", table.Schema);
         command.Parameters.AddWithValue("@table", table.Table);
 
@@ -247,6 +253,7 @@ WHERE s.name = @schema
 
         await using var command = target.CreateCommand();
         command.CommandText = sql;
+        command.CommandTimeout = MetadataQueryTimeoutSeconds;
         command.Parameters.AddWithValue("@schema", table.Schema);
         command.Parameters.AddWithValue("@table", table.Table);
 
@@ -271,6 +278,7 @@ WHERE TABLE_SCHEMA = @schema
 
         await using var command = target.CreateCommand();
         command.CommandText = sql;
+        command.CommandTimeout = MetadataQueryTimeoutSeconds;
         command.Parameters.AddWithValue("@schema", table.Schema);
         command.Parameters.AddWithValue("@table", table.Table);
 
