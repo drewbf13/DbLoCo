@@ -9,6 +9,10 @@ public sealed class SqlTableSeeder : ITableSeeder
 {
     private const int MaxConcurrentSeedOperationsPerLevel = 8;
 
+    private const int MaxConcurrentSeedOperationsPerLevel = 8;
+    private const int MetadataQueryTimeoutSeconds = 180;
+    private const int SeedSourceQueryTimeoutSeconds = 600;
+
     private readonly SqlConnectionFactory _connectionFactory;
     private readonly SqlExecutionHelper _sql;
     private readonly ILogger<SqlTableSeeder> _logger;
@@ -91,24 +95,39 @@ public sealed class SqlTableSeeder : ITableSeeder
         await source.OpenAsync(cancellationToken);
         await target.OpenAsync(cancellationToken);
 
-        var columnList = await LoadColumnListAsync(source, table, cancellationToken);
+        var computedColumns = await LoadComputedColumnListAsync(target, table, cancellationToken);
+        var columnList = (await LoadColumnListAsync(source, table, cancellationToken))
+            .Where(c => !computedColumns.Contains(c, StringComparer.OrdinalIgnoreCase))
+            .ToList();
         if (columnList.Count == 0)
         {
-            throw new InvalidOperationException($"No columns found for source table {table.SourceDatabase}.{table.Schema}.{table.Table}");
+            if (computedColumns.Count > 0)
+            {
+                throw new InvalidOperationException(
+                    $"No writable columns found for source table {table.SourceDatabase}.{table.Schema}.{table.Table} after excluding computed columns.");
+            }
+
+            throw new InvalidOperationException(
+                $"No columns found for source table {table.SourceDatabase}.{table.Schema}.{table.Table}");
         }
 
         var escapedColumns = string.Join(", ", columnList.Select(c => $"[{EscapeIdentifier(c)}]"));
         var sourceQuery = $"SELECT {escapedColumns} FROM {destinationName};";
         await using var sourceCommand = source.CreateCommand();
         sourceCommand.CommandText = sourceQuery;
-        sourceCommand.CommandTimeout = 300;
+        sourceCommand.CommandTimeout = SeedSourceQueryTimeoutSeconds;
 
         await using var reader = await sourceCommand.ExecuteReaderAsync(cancellationToken);
         var primaryKeyColumns = await LoadPrimaryKeyColumnListAsync(target, table, cancellationToken);
         var identityColumns = await LoadIdentityColumnListAsync(target, table, cancellationToken);
         var nonNullableColumns = await LoadNonNullableColumnListAsync(target, table, cancellationToken);
         var includesIdentityColumns = columnList.Any(c => identityColumns.Contains(c, StringComparer.OrdinalIgnoreCase));
-        var useMergeStrategy = table.TruncateTarget && primaryKeyColumns.Count > 0;
+        var missingPrimaryKeyColumns = primaryKeyColumns
+            .Where(pk => !columnList.Contains(pk, StringComparer.OrdinalIgnoreCase))
+            .ToList();
+        var useMergeStrategy = table.TruncateTarget
+            && primaryKeyColumns.Count > 0
+            && missingPrimaryKeyColumns.Count == 0;
 
         if (useMergeStrategy)
         {
@@ -136,11 +155,24 @@ public sealed class SqlTableSeeder : ITableSeeder
         {
             if (table.TruncateTarget)
             {
-                _logger.LogWarning(
-                    "Table {TargetDatabase}.{Schema}.{Table} requested truncate-style seed but has no primary key. Falling back to TRUNCATE + INSERT.",
-                    table.TargetDatabase,
-                    table.Schema,
-                    table.Table);
+                if (primaryKeyColumns.Count == 0)
+                {
+                    _logger.LogWarning(
+                        "Table {TargetDatabase}.{Schema}.{Table} requested truncate-style seed but has no primary key. Falling back to TRUNCATE + INSERT.",
+                        table.TargetDatabase,
+                        table.Schema,
+                        table.Table);
+                }
+                else if (missingPrimaryKeyColumns.Count > 0)
+                {
+                    _logger.LogWarning(
+                        "Table {TargetDatabase}.{Schema}.{Table} requested truncate-style seed but filtered columns excluded primary key columns ({PrimaryKeyColumns}). Falling back to TRUNCATE + INSERT.",
+                        table.TargetDatabase,
+                        table.Schema,
+                        table.Table,
+                        string.Join(", ", missingPrimaryKeyColumns.OrderBy(c => c, StringComparer.OrdinalIgnoreCase)));
+                }
+
                 await _sql.ExecuteNonQueryAsync(target, $"TRUNCATE TABLE {destinationName};", cancellationToken);
             }
 
@@ -156,6 +188,16 @@ public sealed class SqlTableSeeder : ITableSeeder
             table.TargetDatabase,
             table.Schema,
             table.Table);
+
+        if (computedColumns.Count > 0)
+        {
+            _logger.LogInformation(
+                "Skipped computed columns for {TargetDatabase}.{Schema}.{Table}: {Columns}",
+                table.TargetDatabase,
+                table.Schema,
+                table.Table,
+                string.Join(", ", computedColumns.OrderBy(c => c, StringComparer.OrdinalIgnoreCase)));
+        }
     }
 
     private static async Task<List<string>> LoadColumnListAsync(SqlConnection source, SeedTablePlan table, CancellationToken cancellationToken)
@@ -168,6 +210,7 @@ ORDER BY ORDINAL_POSITION;";
 
         await using var command = source.CreateCommand();
         command.CommandText = sql;
+        command.CommandTimeout = MetadataQueryTimeoutSeconds;
         command.Parameters.AddWithValue("@schema", table.Schema);
         command.Parameters.AddWithValue("@table", table.Table);
 
@@ -197,6 +240,7 @@ ORDER BY k.ORDINAL_POSITION;";
 
         await using var command = target.CreateCommand();
         command.CommandText = sql;
+        command.CommandTimeout = MetadataQueryTimeoutSeconds;
         command.Parameters.AddWithValue("@schema", table.Schema);
         command.Parameters.AddWithValue("@table", table.Table);
 
@@ -222,6 +266,34 @@ WHERE s.name = @schema
 
         await using var command = target.CreateCommand();
         command.CommandText = sql;
+        command.CommandTimeout = MetadataQueryTimeoutSeconds;
+        command.Parameters.AddWithValue("@schema", table.Schema);
+        command.Parameters.AddWithValue("@table", table.Table);
+
+        var columns = new List<string>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            columns.Add(reader.GetString(0));
+        }
+
+        return columns;
+    }
+
+    private static async Task<List<string>> LoadComputedColumnListAsync(SqlConnection target, SeedTablePlan table, CancellationToken cancellationToken)
+    {
+        const string sql = @"
+SELECT c.name
+FROM sys.columns c
+INNER JOIN sys.tables t ON c.object_id = t.object_id
+INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
+WHERE s.name = @schema
+  AND t.name = @table
+  AND c.is_computed = 1;";
+
+        await using var command = target.CreateCommand();
+        command.CommandText = sql;
+        command.CommandTimeout = MetadataQueryTimeoutSeconds;
         command.Parameters.AddWithValue("@schema", table.Schema);
         command.Parameters.AddWithValue("@table", table.Table);
 
@@ -246,6 +318,7 @@ WHERE TABLE_SCHEMA = @schema
 
         await using var command = target.CreateCommand();
         command.CommandText = sql;
+        command.CommandTimeout = MetadataQueryTimeoutSeconds;
         command.Parameters.AddWithValue("@schema", table.Schema);
         command.Parameters.AddWithValue("@table", table.Table);
 
