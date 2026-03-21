@@ -38,6 +38,7 @@ Important settings:
 - `Clone:Docker:HostPort`
 - `Clone:Docker:SaPassword`
 - `Clone:Source:ConnectionString`
+- `Clone:Source:EnableAlwaysEncrypted` (set `true` when source tables use Always Encrypted columns)
 - `Clone:Restore:Materializer` (`CreateEmpty`, `AzureBackup`, or `NoOp`)
 - `Clone:Restore:AzureBackup:BackupUrlTemplate`
 - `Clone:Restore:AzureBackup:SharedAccessSignature` (optional, auto-generated with current user identity when omitted)
@@ -193,6 +194,23 @@ If your migrations project is already on your machine, set `Clone:Migration:Loca
 If SQL Server returns `CREATE INDEX failed ... SET options have incorrect settings: 'QUOTED_IDENTIFIER'`, make sure your `sqlcmd` invocation includes `-I` so quoted identifiers are enabled for the session that runs the script.
 
 Prefer the **non-idempotent** script shape above for local clone provisioning. This avoids SQL Server batch/parser edge cases that can occur with idempotent wrappers around module DDL (for example `CREATE VIEW`).
+
+### Troubleshooting: `SSL Provider ... The specified data could not be decrypted`
+
+This error is usually a **TLS transport/session** problem, not SQL table encryption metadata. Practical steps:
+
+1. Keep `Encrypt=True` for cloud SQL sources and validate endpoint/certificate chain.
+2. Upgrade client/driver/runtime so `Microsoft.Data.SqlClient` and TLS stack are current.
+3. If your source uses **Always Encrypted** columns, enable client-side decryption with:
+
+```json
+"Source": {
+  "ConnectionString": "...",
+  "EnableAlwaysEncrypted": true
+}
+```
+
+`EnableAlwaysEncrypted` sets SqlClient `Column Encryption Setting=Enabled` for source connections so supported encrypted column values can be read during seed operations.
 
 This script-first pattern is usually simpler than having SqlClone dynamically load a referenced `DbContext` and call `Migrate()` itself, because it keeps SqlClone decoupled from application assemblies, runtime versions, and design-time `DbContext` wiring.
 

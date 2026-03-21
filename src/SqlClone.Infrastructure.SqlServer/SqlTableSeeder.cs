@@ -10,6 +10,7 @@ public sealed class SqlTableSeeder : ITableSeeder
     private const int MaxConcurrentSeedOperationsPerLevel = 8;
     private const int MetadataQueryTimeoutSeconds = 180;
     private const int SeedSourceQueryTimeoutSeconds = 600;
+    private const int MaxSeedAttempts = 3;
 
     private readonly SqlConnectionFactory _connectionFactory;
     private readonly SqlExecutionHelper _sql;
@@ -60,26 +61,82 @@ public sealed class SqlTableSeeder : ITableSeeder
 
     private async Task SeedTableWithWarningAsync(SeedTablePlan table, CancellationToken cancellationToken)
     {
-        try
+        for (var attempt = 1; attempt <= MaxSeedAttempts; attempt++)
         {
-            await SeedTableAsync(table, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+
+            try
+            {
+                await SeedTableAsync(table, cancellationToken);
+                return;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex) when (attempt < MaxSeedAttempts && IsTransientTransportError(ex))
+            {
+                var delay = TimeSpan.FromSeconds(Math.Pow(2, attempt - 1));
+                _logger.LogWarning(
+                    ex,
+                    "Transient transport failure while seeding {SourceDatabase}.{Schema}.{Table} -> {TargetDatabase}.{Schema}.{Table} (attempt {Attempt}/{MaxAttempts}). Retrying in {DelaySeconds}s.",
+                    table.SourceDatabase,
+                    table.Schema,
+                    table.Table,
+                    table.TargetDatabase,
+                    table.Schema,
+                    table.Table,
+                    attempt,
+                    MaxSeedAttempts,
+                    delay.TotalSeconds);
+
+                await Task.Delay(delay, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "Skipping table {SourceDatabase}.{Schema}.{Table} -> {TargetDatabase}.{Schema}.{Table} after seed failure.",
+                    table.SourceDatabase,
+                    table.Schema,
+                    table.Table,
+                    table.TargetDatabase,
+                    table.Schema,
+                    table.Table);
+                return;
+            }
         }
-        catch (OperationCanceledException)
+
+        _logger.LogWarning(
+            "Skipping table {SourceDatabase}.{Schema}.{Table} -> {TargetDatabase}.{Schema}.{Table} after exhausting retry attempts.",
+            table.SourceDatabase,
+            table.Schema,
+            table.Table,
+            table.TargetDatabase,
+            table.Schema,
+            table.Table);
+    }
+
+    private static bool IsTransientTransportError(Exception exception)
+    {
+        if (exception is SqlException sqlException)
         {
-            throw;
+            var message = sqlException.Message;
+            if (message.Contains("transport-level error", StringComparison.OrdinalIgnoreCase)
+                || message.Contains("SSL Provider", StringComparison.OrdinalIgnoreCase)
+                || message.Contains("could not be decrypted", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            if (sqlException.InnerException is System.ComponentModel.Win32Exception win32Exception
+                && win32Exception.NativeErrorCode == unchecked((int)0x80090330))
+            {
+                return true;
+            }
         }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(
-                ex,
-                "Skipping table {SourceDatabase}.{Schema}.{Table} -> {TargetDatabase}.{Schema}.{Table} after seed failure.",
-                table.SourceDatabase,
-                table.Schema,
-                table.Table,
-                table.TargetDatabase,
-                table.Schema,
-                table.Table);
-        }
+
+        return exception.InnerException is not null && IsTransientTransportError(exception.InnerException);
     }
 
     private async Task SeedTableAsync(SeedTablePlan table, CancellationToken cancellationToken)
