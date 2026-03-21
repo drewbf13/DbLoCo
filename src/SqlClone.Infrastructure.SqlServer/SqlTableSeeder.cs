@@ -100,7 +100,12 @@ public sealed class SqlTableSeeder : ITableSeeder
         var identityColumns = await LoadIdentityColumnListAsync(target, table, cancellationToken);
         var nonNullableColumns = await LoadNonNullableColumnListAsync(target, table, cancellationToken);
         var includesIdentityColumns = columnList.Any(c => identityColumns.Contains(c, StringComparer.OrdinalIgnoreCase));
-        var useMergeStrategy = table.TruncateTarget && primaryKeyColumns.Count > 0;
+        var missingPrimaryKeyColumns = primaryKeyColumns
+            .Where(pk => !columnList.Contains(pk, StringComparer.OrdinalIgnoreCase))
+            .ToList();
+        var useMergeStrategy = table.TruncateTarget
+            && primaryKeyColumns.Count > 0
+            && missingPrimaryKeyColumns.Count == 0;
 
         if (useMergeStrategy)
         {
@@ -128,11 +133,24 @@ public sealed class SqlTableSeeder : ITableSeeder
         {
             if (table.TruncateTarget)
             {
-                _logger.LogWarning(
-                    "Table {TargetDatabase}.{Schema}.{Table} requested truncate-style seed but has no primary key. Falling back to TRUNCATE + INSERT.",
-                    table.TargetDatabase,
-                    table.Schema,
-                    table.Table);
+                if (primaryKeyColumns.Count == 0)
+                {
+                    _logger.LogWarning(
+                        "Table {TargetDatabase}.{Schema}.{Table} requested truncate-style seed but has no primary key. Falling back to TRUNCATE + INSERT.",
+                        table.TargetDatabase,
+                        table.Schema,
+                        table.Table);
+                }
+                else if (missingPrimaryKeyColumns.Count > 0)
+                {
+                    _logger.LogWarning(
+                        "Table {TargetDatabase}.{Schema}.{Table} requested truncate-style seed but filtered columns excluded primary key columns ({PrimaryKeyColumns}). Falling back to TRUNCATE + INSERT.",
+                        table.TargetDatabase,
+                        table.Schema,
+                        table.Table,
+                        string.Join(", ", missingPrimaryKeyColumns.OrderBy(c => c, StringComparer.OrdinalIgnoreCase)));
+                }
+
                 await _sql.ExecuteNonQueryAsync(target, $"TRUNCATE TABLE {destinationName};", cancellationToken);
             }
 
