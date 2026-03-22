@@ -200,6 +200,7 @@ public sealed class SqlTableSeeder : ITableSeeder
 
         var escapedColumns = string.Join(", ", columnList.Select(c => $"[{EscapeIdentifier(c)}]"));
         var sourceQuery = $"SELECT {escapedColumns} FROM {destinationName};";
+        var expectedSourceRowCount = await LoadSourceRowCountAsync(source, destinationName, cancellationToken);
         await using var sourceCommand = source.CreateCommand();
         sourceCommand.CommandText = sourceQuery;
         sourceCommand.CommandTimeout = SeedSourceQueryTimeoutSeconds;
@@ -237,6 +238,7 @@ public sealed class SqlTableSeeder : ITableSeeder
             {
                 await bulkCopy.WriteToServerAsync(reader, cancellationToken);
             }
+            copiedRows = Math.Max(copiedRows, expectedSourceRowCount);
 
             var mergeSql = BuildMergeSql(destinationName, tempTableName, columnList, primaryKeyColumns, nonNullableColumns);
             if (includesIdentityColumns)
@@ -283,6 +285,7 @@ public sealed class SqlTableSeeder : ITableSeeder
                     rowsCopied);
             });
             await bulkCopy.WriteToServerAsync(reader, cancellationToken);
+            copiedRows = Math.Max(copiedRows, expectedSourceRowCount);
         }
 
         stopwatch.Stop();
@@ -330,6 +333,21 @@ ORDER BY ORDINAL_POSITION;";
         }
 
         return columns;
+    }
+
+    private static async Task<long> LoadSourceRowCountAsync(SqlConnection source, string destinationName, CancellationToken cancellationToken)
+    {
+        await using var rowCountCommand = source.CreateCommand();
+        rowCountCommand.CommandText = $"SELECT COUNT_BIG(*) FROM {destinationName};";
+        rowCountCommand.CommandTimeout = SeedSourceQueryTimeoutSeconds;
+
+        var rowCount = await rowCountCommand.ExecuteScalarAsync(cancellationToken);
+        if (rowCount is null || rowCount == DBNull.Value)
+        {
+            return 0;
+        }
+
+        return Convert.ToInt64(rowCount);
     }
 
     private static async Task<List<string>> LoadPrimaryKeyColumnListAsync(SqlConnection target, SeedTablePlan table, CancellationToken cancellationToken)
