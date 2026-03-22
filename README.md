@@ -175,6 +175,8 @@ Example:
       "Schema": "dbo",
       "Table": "ReferenceData",
       "TruncateTarget": true,
+      "LatestRows": 10000,
+      "LatestOrderBy": "[CreatedUtc] DESC, [Id] DESC",
       "Order": 10,
       "GroupKey": 1
     }
@@ -240,6 +242,7 @@ Ordering notes:
 - **Migration ordering** is controlled by your migration tool/repo (via `BuildCommand`). SqlClone invokes that command once.
 - **Seed ordering** is controlled by `Clone:Seed:Tables[*]:Order` (ascending). Tables in the same order value are seeded in parallel.
 - **Seed grouping metadata** is provided by `Clone:Seed:Tables[*]:GroupKey` (for example domain/schema lanes in generated config) and is used as a deterministic tie-breaker.
+- **Seed row limiting** can be configured with `Clone:Seed:Tables[*]:LatestRows` plus optional `LatestOrderBy` (defaults to primary key descending). Child tables that reference limited parent tables are automatically filtered to rows whose foreign keys exist in the parent's selected latest set.
 - **Post-clone scripts** still run in lexical file name order.
 
 ## Commands

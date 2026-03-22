@@ -31,6 +31,8 @@ public sealed class ClonePlanFactory : IClonePlanFactory
                 Schema = string.IsNullOrWhiteSpace(table.Schema) ? "dbo" : table.Schema,
                 Table = table.Table,
                 TruncateTarget = table.TruncateTarget,
+                LatestRows = table.LatestRows is > 0 ? table.LatestRows : null,
+                LatestOrderBy = table.LatestOrderBy,
                 Order = table.Order,
                 GroupKey = table.GroupKey > 0 ? table.GroupKey : 1
             })

@@ -36,6 +36,9 @@ public sealed class SqlTableSeeder : ITableSeeder
     public async Task SeedAsync(IReadOnlyList<SeedTablePlan> tables, CancellationToken cancellationToken)
     {
         var totalTables = tables.Count;
+        var tablePlanLookup = tables.ToDictionary(
+            table => TableRefKey.Create(table.SourceDatabase, table.Schema, table.Table),
+            table => table);
         var completedTables = 0;
         var failedTables = 0;
         var runningTables = 0;
@@ -49,7 +52,7 @@ public sealed class SqlTableSeeder : ITableSeeder
 
             using var concurrencyGate = new SemaphoreSlim(MaxConcurrentSeedOperationsPerLevel);
             var levelTasks = dependencyLevel
-                .Select(table => SeedTableWithWarningThrottledAsync(table, concurrencyGate, cancellationToken))
+                .Select(table => SeedTableWithWarningThrottledAsync(table, tablePlanLookup, concurrencyGate, cancellationToken))
                 .ToArray();
 
             await Task.WhenAll(levelTasks);
@@ -81,6 +84,7 @@ public sealed class SqlTableSeeder : ITableSeeder
 
         async Task SeedTableWithWarningThrottledAsync(
             SeedTablePlan table,
+            IReadOnlyDictionary<TableRefKey, SeedTablePlan> planLookup,
             SemaphoreSlim concurrencyGate,
             CancellationToken ct)
         {
@@ -90,7 +94,7 @@ public sealed class SqlTableSeeder : ITableSeeder
 
             try
             {
-                var succeeded = await SeedTableWithWarningAsync(table, ct);
+                var succeeded = await SeedTableWithWarningAsync(table, planLookup, ct);
                 if (!succeeded)
                 {
                     Interlocked.Increment(ref failedTables);
@@ -108,7 +112,10 @@ public sealed class SqlTableSeeder : ITableSeeder
     }
 
 
-    private async Task<bool> SeedTableWithWarningAsync(SeedTablePlan table, CancellationToken cancellationToken)
+    private async Task<bool> SeedTableWithWarningAsync(
+        SeedTablePlan table,
+        IReadOnlyDictionary<TableRefKey, SeedTablePlan> planLookup,
+        CancellationToken cancellationToken)
     {
         const bool allowRetry = true;
 
@@ -118,7 +125,7 @@ public sealed class SqlTableSeeder : ITableSeeder
 
             try
             {
-                await SeedTableAsync(table, cancellationToken);
+                await SeedTableAsync(table, planLookup, cancellationToken);
                 return true;
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && attempt < MaxSeedAttempts)
@@ -196,7 +203,10 @@ public sealed class SqlTableSeeder : ITableSeeder
         SqlClientTransientRetry.IsTransientTransportError(exception)
         || SqlClientTransientRetry.IsTransientSqlError(exception);
 
-    private async Task SeedTableAsync(SeedTablePlan table, CancellationToken cancellationToken)
+    private async Task SeedTableAsync(
+        SeedTablePlan table,
+        IReadOnlyDictionary<TableRefKey, SeedTablePlan> planLookup,
+        CancellationToken cancellationToken)
     {
         using var attemptTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         attemptTimeout.CancelAfter(SeedAttemptTimeout);
@@ -240,10 +250,13 @@ public sealed class SqlTableSeeder : ITableSeeder
         }
 
         var escapedColumns = string.Join(", ", columnList.Select(c => $"[{EscapeIdentifier(c)}]"));
-        var sourceQuery = $"SELECT {escapedColumns} FROM {destinationName};";
+        var sourceFromClause = await BuildSourceFromClauseAsync(source, table, effectiveCancellationToken);
+        var fkRelationships = await LoadForeignKeyRelationshipsAsync(source, table, effectiveCancellationToken);
+        var sourceFilterClause = await BuildSourceFilterClauseAsync(source, table, planLookup, fkRelationships, effectiveCancellationToken);
+        var sourceQuery = $"SELECT {escapedColumns} FROM {sourceFromClause}{sourceFilterClause};";
         var estimatedRowSizeBytes = await EstimateRowSizeBytesAsync(source, table, columnList, effectiveCancellationToken);
         var bulkCopyBatchSize = ComputeBulkCopyBatchSize(estimatedRowSizeBytes);
-        var expectedSourceRowCount = await LoadSourceRowCountAsync(source, destinationName, effectiveCancellationToken);
+        var expectedSourceRowCount = await LoadSourceRowCountAsync(source, sourceFromClause, sourceFilterClause, effectiveCancellationToken);
         await using var sourceCommand = source.CreateCommand();
         sourceCommand.CommandText = sourceQuery;
         sourceCommand.CommandTimeout = SeedSourceQueryTimeoutSeconds;
@@ -380,10 +393,14 @@ ORDER BY ORDINAL_POSITION;";
         return columns;
     }
 
-    private static async Task<long> LoadSourceRowCountAsync(SqlConnection source, string destinationName, CancellationToken cancellationToken)
+    private static async Task<long> LoadSourceRowCountAsync(
+        SqlConnection source,
+        string sourceFromClause,
+        string sourceFilterClause,
+        CancellationToken cancellationToken)
     {
         await using var rowCountCommand = source.CreateCommand();
-        rowCountCommand.CommandText = $"SELECT COUNT_BIG(*) FROM {destinationName};";
+        rowCountCommand.CommandText = $"SELECT COUNT_BIG(*) FROM {sourceFromClause}{sourceFilterClause};";
         rowCountCommand.CommandTimeout = SeedSourceQueryTimeoutSeconds;
 
         var rowCount = await rowCountCommand.ExecuteScalarAsync(cancellationToken);
@@ -501,6 +518,131 @@ WHERE TABLE_SCHEMA = @schema
         }
 
         return columns;
+    }
+
+    private async Task<string> BuildSourceFilterClauseAsync(
+        SqlConnection source,
+        SeedTablePlan table,
+        IReadOnlyDictionary<TableRefKey, SeedTablePlan> planLookup,
+        IReadOnlyList<ForeignKeyRelationship> fkRelationships,
+        CancellationToken cancellationToken)
+    {
+        var clauses = new List<string>();
+
+        foreach (var relationship in fkRelationships)
+        {
+            var parentKey = TableRefKey.Create(table.SourceDatabase, relationship.ReferencedSchema, relationship.ReferencedTable);
+            if (!planLookup.TryGetValue(parentKey, out var parentPlan) || parentPlan.LatestRows is not > 0)
+            {
+                continue;
+            }
+
+            var parentOrderByClause = await ResolveLatestOrderByClauseAsync(source, parentPlan, cancellationToken);
+            var parentColumns = string.Join(", ", relationship.ColumnPairs.Select(pair => $"[{EscapeIdentifier(pair.ParentColumn)}]"));
+            var joinPredicate = string.Join(
+                " AND ",
+                relationship.ColumnPairs.Select(pair =>
+                    $"[p].[{EscapeIdentifier(pair.ParentColumn)}] = [src].[{EscapeIdentifier(pair.ChildColumn)}]"));
+
+            clauses.Add(
+                $@"EXISTS (
+    SELECT 1
+    FROM (
+        SELECT TOP ({parentPlan.LatestRows.Value}) {parentColumns}
+        FROM [{EscapeIdentifier(parentPlan.Schema)}].[{EscapeIdentifier(parentPlan.Table)}]
+        ORDER BY {parentOrderByClause}
+    ) AS [p]
+    WHERE {joinPredicate}
+)");
+        }
+
+        if (clauses.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        return $"{Environment.NewLine}WHERE {string.Join($"{Environment.NewLine}  AND ", clauses)}";
+    }
+
+    private static async Task<string> BuildSourceFromClauseAsync(
+        SqlConnection source,
+        SeedTablePlan table,
+        CancellationToken cancellationToken)
+    {
+        var tableName = $"[{EscapeIdentifier(table.Schema)}].[{EscapeIdentifier(table.Table)}]";
+        if (table.LatestRows is not > 0)
+        {
+            return $"{tableName} AS [src]";
+        }
+
+        var orderByClause = await ResolveLatestOrderByClauseAsync(source, table, cancellationToken);
+        return $"(SELECT TOP ({table.LatestRows.Value}) * FROM {tableName} ORDER BY {orderByClause}) AS [src]";
+    }
+
+    private static async Task<IReadOnlyList<ForeignKeyRelationship>> LoadForeignKeyRelationshipsAsync(
+        SqlConnection source,
+        SeedTablePlan table,
+        CancellationToken cancellationToken)
+    {
+        const string sql = @"
+SELECT fk.name,
+       rs.name AS referenced_schema,
+       rt.name AS referenced_table,
+       pc.name AS child_column,
+       rc.name AS parent_column
+FROM sys.foreign_keys fk
+INNER JOIN sys.foreign_key_columns fkc ON fk.object_id = fkc.constraint_object_id
+INNER JOIN sys.tables pt ON fk.parent_object_id = pt.object_id
+INNER JOIN sys.schemas ps ON pt.schema_id = ps.schema_id
+INNER JOIN sys.columns pc ON pc.object_id = pt.object_id AND pc.column_id = fkc.parent_column_id
+INNER JOIN sys.tables rt ON fk.referenced_object_id = rt.object_id
+INNER JOIN sys.schemas rs ON rt.schema_id = rs.schema_id
+INNER JOIN sys.columns rc ON rc.object_id = rt.object_id AND rc.column_id = fkc.referenced_column_id
+WHERE ps.name = @schema
+  AND pt.name = @table
+ORDER BY fk.name, fkc.constraint_column_id;";
+
+        await using var command = source.CreateCommand();
+        command.CommandText = sql;
+        command.CommandTimeout = MetadataQueryTimeoutSeconds;
+        command.Parameters.AddWithValue("@schema", table.Schema);
+        command.Parameters.AddWithValue("@table", table.Table);
+
+        var relationships = new Dictionary<string, ForeignKeyRelationship>(StringComparer.OrdinalIgnoreCase);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var fkName = reader.GetString(0);
+            if (!relationships.TryGetValue(fkName, out var relationship))
+            {
+                relationship = new ForeignKeyRelationship(reader.GetString(1), reader.GetString(2), []);
+                relationships.Add(fkName, relationship);
+            }
+
+            relationship.ColumnPairs.Add(new ForeignKeyColumnPair(reader.GetString(3), reader.GetString(4)));
+        }
+
+        return relationships.Values.ToList();
+    }
+
+    private static async Task<string> ResolveLatestOrderByClauseAsync(
+        SqlConnection source,
+        SeedTablePlan table,
+        CancellationToken cancellationToken)
+    {
+        if (!string.IsNullOrWhiteSpace(table.LatestOrderBy))
+        {
+            return table.LatestOrderBy!;
+        }
+
+        var primaryKeys = await LoadPrimaryKeyColumnListAsync(source, table, cancellationToken);
+        if (primaryKeys.Count > 0)
+        {
+            return string.Join(", ", primaryKeys.Select(column => $"[{EscapeIdentifier(column)}] DESC"));
+        }
+
+        throw new InvalidOperationException(
+            $"LatestRows configured for {table.SourceDatabase}.{table.Schema}.{table.Table} requires LatestOrderBy or a primary key.");
     }
 
     private static SqlBulkCopy CreateBulkCopy(
@@ -679,6 +821,19 @@ WHEN NOT MATCHED BY TARGET{insertPredicate} THEN
 SET IDENTITY_INSERT {destinationName} ON;
 {sql}
 SET IDENTITY_INSERT {destinationName} OFF;";
+
+    private sealed record TableRefKey(string Database, string Schema, string Table)
+    {
+        public static TableRefKey Create(string database, string schema, string table) =>
+            new(database.Trim(), schema.Trim(), table.Trim());
+    }
+
+    private sealed record ForeignKeyRelationship(
+        string ReferencedSchema,
+        string ReferencedTable,
+        List<ForeignKeyColumnPair> ColumnPairs);
+
+    private sealed record ForeignKeyColumnPair(string ChildColumn, string ParentColumn);
 
     private static string EscapeIdentifier(string value) => value.Replace("]", "]]", StringComparison.Ordinal);
 }
