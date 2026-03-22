@@ -2,6 +2,7 @@ using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
 using SqlClone.Domain.Interfaces;
 using SqlClone.Domain.Models;
+using System.Diagnostics;
 
 namespace SqlClone.Infrastructure.SqlServer;
 
@@ -11,6 +12,7 @@ public sealed class SqlTableSeeder : ITableSeeder
     private const int MetadataQueryTimeoutSeconds = 180;
     private const int SeedSourceQueryTimeoutSeconds = 600;
     private const int MaxSeedAttempts = 3;
+    private const int BulkCopyProgressIntervalRows = 10_000;
 
     private readonly SqlConnectionFactory _connectionFactory;
     private readonly SqlExecutionHelper _sql;
@@ -28,6 +30,13 @@ public sealed class SqlTableSeeder : ITableSeeder
 
     public async Task SeedAsync(IReadOnlyList<SeedTablePlan> tables, CancellationToken cancellationToken)
     {
+        var totalTables = tables.Count;
+        var completedTables = 0;
+        var failedTables = 0;
+        var runningTables = 0;
+
+        _logger.LogInformation("Starting seed for {TotalTables} table(s).", totalTables);
+
         foreach (var dependencyLevel in tables.GroupBy(table => table.Order > 0 ? table.Order : table.GroupKey).OrderBy(group => group.Key))
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -39,27 +48,52 @@ public sealed class SqlTableSeeder : ITableSeeder
 
             await Task.WhenAll(levelTasks);
         }
+
+        _logger.LogInformation(
+            "Seed finished. {Completed}/{Total} table(s) completed, {Failed} failed.",
+            completedTables,
+            totalTables,
+            failedTables);
+
+        void LogOverallProgress()
+        {
+            _logger.LogInformation(
+                "Seed overall progress: {Completed}/{Total} complete, {Failed} failed, {Running} running.",
+                completedTables,
+                totalTables,
+                failedTables,
+                runningTables);
+        }
+
+        async Task SeedTableWithWarningThrottledAsync(
+            SeedTablePlan table,
+            SemaphoreSlim concurrencyGate,
+            CancellationToken ct)
+        {
+            await concurrencyGate.WaitAsync(ct);
+            Interlocked.Increment(ref runningTables);
+            LogOverallProgress();
+
+            try
+            {
+                var succeeded = await SeedTableWithWarningAsync(table, ct);
+                if (!succeeded)
+                {
+                    Interlocked.Increment(ref failedTables);
+                }
+            }
+            finally
+            {
+                Interlocked.Decrement(ref runningTables);
+                Interlocked.Increment(ref completedTables);
+                LogOverallProgress();
+                concurrencyGate.Release();
+            }
+        }
     }
 
 
-    private async Task SeedTableWithWarningThrottledAsync(
-        SeedTablePlan table,
-        SemaphoreSlim concurrencyGate,
-        CancellationToken cancellationToken)
-    {
-        await concurrencyGate.WaitAsync(cancellationToken);
-
-        try
-        {
-            await SeedTableWithWarningAsync(table, cancellationToken);
-        }
-        finally
-        {
-            concurrencyGate.Release();
-        }
-    }
-
-    private async Task SeedTableWithWarningAsync(SeedTablePlan table, CancellationToken cancellationToken)
+    private async Task<bool> SeedTableWithWarningAsync(SeedTablePlan table, CancellationToken cancellationToken)
     {
         const bool allowRetry = true;
 
@@ -70,7 +104,7 @@ public sealed class SqlTableSeeder : ITableSeeder
             try
             {
                 await SeedTableAsync(table, cancellationToken);
-                return;
+                return true;
             }
             catch (OperationCanceledException)
             {
@@ -106,7 +140,7 @@ public sealed class SqlTableSeeder : ITableSeeder
                     table.TargetDatabase,
                     table.Schema,
                     table.Table);
-                return;
+                return false;
             }
         }
 
@@ -121,10 +155,24 @@ public sealed class SqlTableSeeder : ITableSeeder
                 table.Schema,
                 table.Table);
         }
+
+        return false;
     }
 
     private async Task SeedTableAsync(SeedTablePlan table, CancellationToken cancellationToken)
     {
+        var stopwatch = Stopwatch.StartNew();
+        long copiedRows = 0;
+
+        _logger.LogInformation(
+            "Starting seed for {SourceDatabase}.{Schema}.{Table} -> {TargetDatabase}.{Schema}.{Table}.",
+            table.SourceDatabase,
+            table.Schema,
+            table.Table,
+            table.TargetDatabase,
+            table.Schema,
+            table.Table);
+
         var escapedSchema = EscapeIdentifier(table.Schema);
         var escapedTable = EscapeIdentifier(table.Table);
         var destinationName = $"[{escapedSchema}].[{escapedTable}]";
@@ -152,6 +200,7 @@ public sealed class SqlTableSeeder : ITableSeeder
 
         var escapedColumns = string.Join(", ", columnList.Select(c => $"[{EscapeIdentifier(c)}]"));
         var sourceQuery = $"SELECT {escapedColumns} FROM {destinationName};";
+        var expectedSourceRowCount = await LoadSourceRowCountAsync(source, destinationName, cancellationToken);
         await using var sourceCommand = source.CreateCommand();
         sourceCommand.CommandText = sourceQuery;
         sourceCommand.CommandTimeout = SeedSourceQueryTimeoutSeconds;
@@ -176,10 +225,20 @@ public sealed class SqlTableSeeder : ITableSeeder
                 $"SELECT TOP (0) {escapedColumns} INTO {tempTableName} FROM {destinationName};",
                 cancellationToken);
 
-            using (var bulkCopy = CreateBulkCopy(target, tempTableName, columnList, includesIdentityColumns))
+            using (var bulkCopy = CreateBulkCopy(target, tempTableName, columnList, includesIdentityColumns, rowsCopied =>
+                   {
+                       copiedRows = rowsCopied;
+                       _logger.LogInformation(
+                           "Seeding progress {SourceDatabase}.{Schema}.{Table}: {RowsCopied} row(s) copied.",
+                           table.SourceDatabase,
+                           table.Schema,
+                           table.Table,
+                           rowsCopied);
+                   }))
             {
                 await bulkCopy.WriteToServerAsync(reader, cancellationToken);
             }
+            copiedRows = Math.Max(copiedRows, expectedSourceRowCount);
 
             var mergeSql = BuildMergeSql(destinationName, tempTableName, columnList, primaryKeyColumns, nonNullableColumns);
             if (includesIdentityColumns)
@@ -215,18 +274,31 @@ public sealed class SqlTableSeeder : ITableSeeder
                 await _sql.ExecuteNonQueryAsync(target, $"TRUNCATE TABLE {destinationName};", cancellationToken);
             }
 
-            using var bulkCopy = CreateBulkCopy(target, destinationName, columnList, includesIdentityColumns);
+            using var bulkCopy = CreateBulkCopy(target, destinationName, columnList, includesIdentityColumns, rowsCopied =>
+            {
+                copiedRows = rowsCopied;
+                _logger.LogInformation(
+                    "Seeding progress {SourceDatabase}.{Schema}.{Table}: {RowsCopied} row(s) copied.",
+                    table.SourceDatabase,
+                    table.Schema,
+                    table.Table,
+                    rowsCopied);
+            });
             await bulkCopy.WriteToServerAsync(reader, cancellationToken);
+            copiedRows = Math.Max(copiedRows, expectedSourceRowCount);
         }
 
+        stopwatch.Stop();
         _logger.LogInformation(
-            "Seeded {Database}.{Schema}.{Table} into {TargetDatabase}.{Schema}.{Table}",
+            "Seeded {SourceDatabase}.{Schema}.{Table} into {TargetDatabase}.{Schema}.{Table} in {ElapsedMs} ms ({RowsCopied} row(s) copied).",
             table.SourceDatabase,
             table.Schema,
             table.Table,
             table.TargetDatabase,
             table.Schema,
-            table.Table);
+            table.Table,
+            stopwatch.ElapsedMilliseconds,
+            copiedRows);
 
         if (computedColumns.Count > 0)
         {
@@ -261,6 +333,21 @@ ORDER BY ORDINAL_POSITION;";
         }
 
         return columns;
+    }
+
+    private static async Task<long> LoadSourceRowCountAsync(SqlConnection source, string destinationName, CancellationToken cancellationToken)
+    {
+        await using var rowCountCommand = source.CreateCommand();
+        rowCountCommand.CommandText = $"SELECT COUNT_BIG(*) FROM {destinationName};";
+        rowCountCommand.CommandTimeout = SeedSourceQueryTimeoutSeconds;
+
+        var rowCount = await rowCountCommand.ExecuteScalarAsync(cancellationToken);
+        if (rowCount is null || rowCount == DBNull.Value)
+        {
+            return 0;
+        }
+
+        return Convert.ToInt64(rowCount);
     }
 
     private static async Task<List<string>> LoadPrimaryKeyColumnListAsync(SqlConnection target, SeedTablePlan table, CancellationToken cancellationToken)
@@ -371,14 +458,25 @@ WHERE TABLE_SCHEMA = @schema
         return columns;
     }
 
-    private static SqlBulkCopy CreateBulkCopy(SqlConnection target, string destination, IEnumerable<string> columns, bool keepIdentity)
+    private static SqlBulkCopy CreateBulkCopy(
+        SqlConnection target,
+        string destination,
+        IEnumerable<string> columns,
+        bool keepIdentity,
+        Action<long>? onRowsCopied = null)
     {
         var options = keepIdentity ? SqlBulkCopyOptions.KeepIdentity : SqlBulkCopyOptions.Default;
         var bulkCopy = new SqlBulkCopy(target, options, null)
         {
             DestinationTableName = destination,
-            BulkCopyTimeout = 600
+            BulkCopyTimeout = 600,
+            NotifyAfter = BulkCopyProgressIntervalRows
         };
+
+        if (onRowsCopied is not null)
+        {
+            bulkCopy.SqlRowsCopied += (_, e) => onRowsCopied(e.RowsCopied);
+        }
 
         foreach (var col in columns)
         {
