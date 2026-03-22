@@ -245,6 +245,47 @@ Ordering notes:
 - **Seed row limiting** can be configured with `Clone:Seed:Tables[*]:LatestRows` plus optional `LatestOrderBy` (defaults to primary key descending). Child tables that reference limited parent tables are automatically filtered to rows whose foreign keys exist in the parent's selected latest set.
 - **Post-clone scripts** still run in lexical file name order.
 
+### Selective Top N seeding per table
+
+You can now selectively copy only the latest **Top N** rows for specific tables while leaving other tables fully copied.
+
+- Set `LatestRows` on a table to enable Top N filtering for that table.
+- Set `LatestOrderBy` when you want explicit recency ordering (for example by `CreatedUtc` then `Id`).
+- Leave `LatestRows` unset (or `0`) to copy the full table.
+
+Example:
+
+```json
+"Seed": {
+  "Enabled": true,
+  "SourceDatabase": "AppDb",
+  "Tables": [
+    {
+      "SourceDatabase": "AppDb",
+      "TargetDatabase": "AppDb",
+      "Schema": "dbo",
+      "Table": "AuditEvents",
+      "TruncateTarget": true,
+      "LatestRows": 5000,
+      "LatestOrderBy": "[CreatedUtc] DESC, [EventId] DESC",
+      "Order": 30,
+      "GroupKey": 2
+    },
+    {
+      "SourceDatabase": "AppDb",
+      "TargetDatabase": "AppDb",
+      "Schema": "dbo",
+      "Table": "ReferenceData",
+      "TruncateTarget": true,
+      "Order": 10,
+      "GroupKey": 1
+    }
+  ]
+}
+```
+
+In this example, `AuditEvents` is limited to the latest 5,000 rows, while `ReferenceData` is copied in full.
+
 ## Commands
 
 ```bash
