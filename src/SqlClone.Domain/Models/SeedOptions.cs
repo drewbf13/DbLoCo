@@ -14,6 +14,8 @@ public sealed class SeedTableOptions
     public string Schema { get; set; } = "dbo";
     public string Table { get; set; } = string.Empty;
     public bool TruncateTarget { get; set; }
+    public int? LatestRows { get; set; }
+    public string? LatestOrderBy { get; set; }
     public int Order { get; set; }
     public int GroupKey { get; set; }
 }
