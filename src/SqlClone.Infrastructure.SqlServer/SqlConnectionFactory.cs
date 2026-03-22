@@ -65,7 +65,7 @@ public sealed class SqlConnectionFactory
 
     private bool CanUseConfiguredSourceConnectionStringAsIs(string? initialCatalog)
     {
-        return !string.IsNullOrWhiteSpace(initialCatalog)
+        return string.IsNullOrWhiteSpace(initialCatalog)
                && !_options.Source.Encrypt.HasValue
                && !_options.Source.TrustServerCertificate.HasValue
                && _options.Source is { DisableConnectionPooling: false, EnableAlwaysEncrypted: null };

@@ -32,6 +32,25 @@ public sealed class SqlConnectionFactoryTests
     }
 
     [Fact]
+    public void CreateSourceConnection_WithoutOverrides_UsesConfiguredConnectionStringAsIs()
+    {
+        const string connectionString = "Server=tcp:example.database.windows.net,1433;Initial Catalog=AppDb;User ID=test@domain.com;Password=test;Encrypt=True;TrustServerCertificate=False;Authentication=\"Active Directory Password\";Column Encryption Setting=enabled;";
+        var options = Options.Create(new CloneOptions
+        {
+            Docker = new DockerOptions { SaPassword = "YourStrong!Passw0rd" },
+            Source = new SourceOptions
+            {
+                ConnectionString = connectionString
+            }
+        });
+
+        var factory = new SqlConnectionFactory(options);
+
+        using var connection = factory.CreateSourceConnection();
+        connection.ConnectionString.Should().Be(connectionString);
+    }
+
+    [Fact]
     public void CreateSourceConnection_AppliesSourceTransportOverrides()
     {
         var options = Options.Create(new CloneOptions
