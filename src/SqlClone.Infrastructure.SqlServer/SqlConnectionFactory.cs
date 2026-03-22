@@ -55,7 +55,7 @@ public sealed class SqlConnectionFactory
             builder.Pooling = false;
         }
 
-        if (_options.Source.EnableAlwaysEncrypted)
+        if (_options.Source.EnableAlwaysEncrypted ?? false)
         {
             builder.ColumnEncryptionSetting = SqlConnectionColumnEncryptionSetting.Enabled;
         }
@@ -65,10 +65,9 @@ public sealed class SqlConnectionFactory
 
     private bool CanUseConfiguredSourceConnectionStringAsIs(string? initialCatalog)
     {
-        return string.IsNullOrWhiteSpace(initialCatalog)
-            && !_options.Source.Encrypt.HasValue
-            && !_options.Source.TrustServerCertificate.HasValue
-            && !_options.Source.DisableConnectionPooling
-            && !_options.Source.EnableAlwaysEncrypted;
+        return !string.IsNullOrWhiteSpace(initialCatalog)
+               && !_options.Source.Encrypt.HasValue
+               && !_options.Source.TrustServerCertificate.HasValue
+               && _options.Source is { DisableConnectionPooling: false, EnableAlwaysEncrypted: null };
     }
 }
