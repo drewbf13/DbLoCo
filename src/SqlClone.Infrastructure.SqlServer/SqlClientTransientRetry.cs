@@ -6,6 +6,12 @@ namespace SqlClone.Infrastructure.SqlServer;
 internal static class SqlClientTransientRetry
 {
     private const int DecryptNativeErrorCode = unchecked((int)0x80090330);
+    private static readonly HashSet<int> TransientSqlErrorNumbers =
+    [
+        -2,   // Timeout expired
+        1205, // Deadlock victim
+        1222  // Lock request timeout
+    ];
 
     public static bool IsTransientTransportError(Exception exception)
     {
@@ -27,6 +33,22 @@ internal static class SqlClientTransientRetry
         }
 
         return exception.InnerException is not null && IsTransientTransportError(exception.InnerException);
+    }
+
+    public static bool IsTransientSqlError(Exception exception)
+    {
+        if (exception is SqlException sqlException)
+        {
+            foreach (SqlError sqlError in sqlException.Errors)
+            {
+                if (TransientSqlErrorNumbers.Contains(sqlError.Number))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return exception.InnerException is not null && IsTransientSqlError(exception.InnerException);
     }
 
     public static async Task OpenWithRetryAsync(SqlConnection connection, int maxAttempts, CancellationToken cancellationToken)
