@@ -305,6 +305,7 @@ public sealed class SourceInspector : ISourceInspector
     {
         var tableByKey = tables.ToDictionary(table => table.Key, table => table, StringComparer.OrdinalIgnoreCase);
         var parentCandidatesByChild = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        var inboundReferenceCountByTable = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var dependency in dependencies)
         {
@@ -318,6 +319,11 @@ public sealed class SourceInspector : ISourceInspector
                 continue;
             }
 
+            inboundReferenceCountByTable[dependency.Referenced.Key] =
+                inboundReferenceCountByTable.TryGetValue(dependency.Referenced.Key, out var currentInboundCount)
+                    ? currentInboundCount + 1
+                    : 1;
+
             if (!parentCandidatesByChild.TryGetValue(dependency.Parent.Key, out var candidates))
             {
                 candidates = [];
@@ -330,9 +336,12 @@ public sealed class SourceInspector : ISourceInspector
         var selectedParentByChild = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (var (childKey, candidateParentKeys) in parentCandidatesByChild)
         {
+            var child = tableByKey[childKey];
             var selectedParentKey = candidateParentKeys
                 .Distinct(StringComparer.OrdinalIgnoreCase)
-                .OrderBy(parentKey => orderByTableKey.TryGetValue(parentKey, out var order) ? order : int.MaxValue)
+                .OrderByDescending(parentKey => ScoreParentTableAffinity(child, tableByKey[parentKey]))
+                .ThenBy(parentKey => inboundReferenceCountByTable.TryGetValue(parentKey, out var count) ? count : 0)
+                .ThenBy(parentKey => orderByTableKey.TryGetValue(parentKey, out var order) ? order : int.MaxValue)
                 .ThenBy(parentKey => parentKey, StringComparer.OrdinalIgnoreCase)
                 .First();
             selectedParentByChild[childKey] = selectedParentKey;
@@ -360,6 +369,37 @@ public sealed class SourceInspector : ISourceInspector
         return rootKeys
             .Select(rootKey => BuildNestedTree(rootKey, tableByKey, childrenByParent, orderByTableKey))
             .ToList();
+    }
+
+    private static int ScoreParentTableAffinity(TableNode child, TableNode candidateParent)
+    {
+        var childTable = child.Table;
+        var parentTable = candidateParent.Table;
+        var childTableNormalized = childTable.ToLowerInvariant();
+        var parentTableNormalized = parentTable.ToLowerInvariant();
+
+        var score = 0;
+
+        if (childTableNormalized.StartsWith(parentTableNormalized + "_", StringComparison.Ordinal))
+        {
+            score += 100;
+        }
+        else if (childTableNormalized.StartsWith(parentTableNormalized, StringComparison.Ordinal))
+        {
+            score += 50;
+        }
+        else if (childTableNormalized.Contains("_" + parentTableNormalized + "_", StringComparison.Ordinal)
+            || childTableNormalized.EndsWith("_" + parentTableNormalized, StringComparison.Ordinal))
+        {
+            score += 20;
+        }
+
+        if (child.Schema.Equals(candidateParent.Schema, StringComparison.OrdinalIgnoreCase))
+        {
+            score += 5;
+        }
+
+        return score;
     }
 
     private static NestedTableNode BuildNestedTree(
