@@ -711,8 +711,14 @@ WHERE TABLE_SCHEMA = @schema
             return string.Join(", ", primaryKeys.Select(column => $"[{EscapeIdentifier(column)}] DESC"));
         }
 
+        var columns = await LoadColumnListAsync(source, table, cancellationToken);
+        if (columns.Count > 0)
+        {
+            return $"[{EscapeIdentifier(columns[0])}] DESC";
+        }
+
         throw new InvalidOperationException(
-            $"LatestRows configured for {table.SourceDatabase}.{table.Schema}.{table.Table} requires LatestOrderBy or a primary key.");
+            $"LatestRows configured for {table.SourceDatabase}.{table.Schema}.{table.Table} but no columns were found to order by.");
     }
 
     private static SqlBulkCopy CreateBulkCopy(
