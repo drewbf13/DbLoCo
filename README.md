@@ -2,6 +2,37 @@
 
 SqlClone is a .NET 10 console tool that provisions a local SQL Server Docker container representing a cloned Azure SQL/MI development environment.
 
+## Install as a .NET tool
+
+You can package and install `SqlClone` as a local/global .NET CLI tool.
+
+1. Pack the tool from the repository root:
+
+```bash
+dotnet pack src/SqlClone.Console/SqlClone.Console.csproj -c Release
+```
+
+2. Install from the generated package (example local install):
+
+```bash
+dotnet tool install --tool-path ./.tools/sqlclone --add-source src/SqlClone.Console/bin/Release DbLoCo.SqlClone
+```
+
+3. Run the tool:
+
+```bash
+./.tools/sqlclone/sqlclone init --environment Development
+./.tools/sqlclone/sqlclone clone --environment Development
+```
+
+For global install, replace step 2 with:
+
+```bash
+dotnet tool install --global DbLoCo.SqlClone --add-source src/SqlClone.Console/bin/Release
+```
+
+When run as an installed tool, place `appsettings.json` in your current working directory (or run `init` to create `appsettings.Local.json` and copy from `appsettings.example.json`).
+
 ## Prerequisites
 
 - Windows development machine (first-class target for v1)
