@@ -13,6 +13,7 @@ public sealed class SqlTableSeeder : ITableSeeder
     private const int MetadataQueryTimeoutSeconds = 180;
     private const int SeedSourceQueryTimeoutSeconds = 600;
     private const int MaxSeedAttempts = 3;
+    private const int MaxInheritedParentFilters = 4;
     private const int BulkCopyProgressIntervalRows = 10_000;
     private const int BulkCopyTargetBatchBytes = 4 * 1024 * 1024;
     private const int BulkCopyMinBatchRows = 100;
@@ -565,7 +566,7 @@ WHERE TABLE_SCHEMA = @schema
             var sourceTableName = $"[{EscapeIdentifier(table.Schema)}].[{EscapeIdentifier(table.Table)}]";
             var fkRelationships = await LoadForeignKeyRelationshipsAsync(source, table, cancellationToken);
             var nullableChildColumns = await LoadNullableColumnLookupAsync(source, table, cancellationToken);
-            var inheritedClauses = new List<string>();
+            var inheritedClauses = new List<InheritedParentFilter>();
 
             foreach (var relationship in fkRelationships)
             {
@@ -609,14 +610,35 @@ WHERE TABLE_SCHEMA = @schema
     WHERE {joinPredicate}
 )";
 
-                inheritedClauses.Add(string.IsNullOrWhiteSpace(nullableBypassPredicate)
+                var clause = string.IsNullOrWhiteSpace(nullableBypassPredicate)
                     ? existsClause
-                    : $"({nullableBypassPredicate} OR {existsClause})");
+                    : $"({nullableBypassPredicate} OR {existsClause})";
+
+                inheritedClauses.Add(new InheritedParentFilter(
+                    clause,
+                    $"{relationship.ReferencedSchema}.{relationship.ReferencedTable}",
+                    ComputeInheritedFilterPriorityScore(
+                        table,
+                        relationship,
+                        nullableChildColumns)));
             }
 
-            var whereClause = inheritedClauses.Count == 0
+            var selectedInheritedClauses = SelectInheritedParentFilters(inheritedClauses, MaxInheritedParentFilters);
+            if (inheritedClauses.Count > selectedInheritedClauses.Count)
+            {
+                _logger.LogWarning(
+                    "Selection query for {SourceDatabase}.{Schema}.{Table} has {TotalFilters} constrained parent filter(s). Limiting to {SelectedFilters} to avoid recursive filter explosion. Selected parent tables: {SelectedParents}.",
+                    table.SourceDatabase,
+                    table.Schema,
+                    table.Table,
+                    inheritedClauses.Count,
+                    selectedInheritedClauses.Count,
+                    string.Join(", ", selectedInheritedClauses.Select(filter => filter.ParentTable)));
+            }
+
+            var whereClause = selectedInheritedClauses.Count == 0
                 ? string.Empty
-                : $"{Environment.NewLine}WHERE {string.Join($"{Environment.NewLine}  AND ", inheritedClauses)}";
+                : $"{Environment.NewLine}WHERE {string.Join($"{Environment.NewLine}  AND ", selectedInheritedClauses.Select(filter => filter.SqlClause))}";
             var filteredSourceSql = $"SELECT * FROM {sourceTableName} AS [src]{whereClause}";
 
             var hasLocalLimit = table.LatestRows is > 0;
@@ -627,7 +649,7 @@ WHERE TABLE_SCHEMA = @schema
                 selectionSql = $"SELECT TOP ({table.LatestRows!.Value}) * FROM ({filteredSourceSql}) AS [limited] ORDER BY {orderByClause}";
             }
 
-            var selection = new TableSelectionQuery(selectionSql, hasLocalLimit || inheritedClauses.Count > 0);
+            var selection = new TableSelectionQuery(selectionSql, hasLocalLimit || selectedInheritedClauses.Count > 0);
             selectionCache[tableKey] = selection;
             return selection;
         }
@@ -926,7 +948,54 @@ SET IDENTITY_INSERT {destinationName} OFF;";
         List<ForeignKeyColumnPair> ColumnPairs);
 
     private sealed record ForeignKeyColumnPair(string ChildColumn, string ParentColumn);
+    internal sealed record InheritedParentFilter(string SqlClause, string ParentTable, int PriorityScore);
     private sealed record TableSelectionQuery(string Sql, bool IsConstrained);
 
     private static string EscapeIdentifier(string value) => value.Replace("]", "]]", StringComparison.Ordinal);
+
+    internal static IReadOnlyList<InheritedParentFilter> SelectInheritedParentFilters(
+        IReadOnlyList<InheritedParentFilter> filters,
+        int maxFilterCount)
+    {
+        if (filters.Count <= maxFilterCount)
+        {
+            return filters;
+        }
+
+        return filters
+            .OrderByDescending(filter => filter.PriorityScore)
+            .ThenBy(filter => filter.ParentTable, StringComparer.OrdinalIgnoreCase)
+            .Take(maxFilterCount)
+            .ToList();
+    }
+
+    private static int ComputeInheritedFilterPriorityScore(
+        SeedTablePlan childTable,
+        ForeignKeyRelationship relationship,
+        IReadOnlySet<string> nullableChildColumns)
+    {
+        var score = 0;
+        var childTableName = childTable.Table.ToLowerInvariant();
+        var parentTableName = relationship.ReferencedTable.ToLowerInvariant();
+
+        if (childTableName.StartsWith(parentTableName, StringComparison.Ordinal)
+            || childTableName.Contains("_" + parentTableName + "_", StringComparison.Ordinal)
+            || childTableName.EndsWith("_" + parentTableName, StringComparison.Ordinal))
+        {
+            score += 40;
+        }
+
+        score += relationship.ColumnPairs.Count * 10;
+        if (relationship.ColumnPairs.All(pair => !nullableChildColumns.Contains(pair.ChildColumn)))
+        {
+            score += 10;
+        }
+
+        if (childTable.Schema.Equals(relationship.ReferencedSchema, StringComparison.OrdinalIgnoreCase))
+        {
+            score += 5;
+        }
+
+        return score;
+    }
 }
