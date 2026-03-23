@@ -179,7 +179,12 @@ Example:
       "LatestRows": 10000,
       "LatestOrderBy": "[CreatedUtc] DESC, [Id] DESC",
       "Order": 10,
-      "GroupKey": 1
+      "GroupKey": 1,
+      "Children": [
+        {
+          "Table": "ReferenceDataTranslations"
+        }
+      ]
     }
   ]
 }
@@ -243,7 +248,8 @@ Ordering notes:
 - **Migration ordering** is controlled by your migration tool/repo (via `BuildCommand`). SqlClone invokes that command once.
 - **Seed ordering** is controlled by `Clone:Seed:Tables[*]:Order` (ascending). Tables in the same order value are seeded in parallel.
 - **Seed grouping metadata** is provided by `Clone:Seed:Tables[*]:GroupKey` (for example domain/schema lanes in generated config) and is used as a deterministic tie-breaker.
-- **Seed row limiting** can be configured with `Clone:Seed:Tables[*]:LatestRows` plus optional `LatestOrderBy` (defaults to primary key descending). Child tables that reference limited parent tables are automatically filtered to rows whose foreign keys exist in the parent's selected latest set.
+- **Seed row limiting** can be configured with `Clone:Seed:Tables[*]:LatestRows` plus optional `LatestOrderBy` (defaults to primary key descending). Child tables that reference limited parent tables are automatically filtered to rows whose foreign keys exist in the parent's selected set, and this is applied recursively through deeper parent/child chains.
+- **Nested seed config** is supported via `Clone:Seed:Tables[*]:Children`. Child entries inherit source/target/schema/order/group defaults from their parent unless overridden.
 - **Schema exclusion** can be configured with `Clone:Seed:ExcludeSchemas` to skip seeding all tables from listed schemas.
 - **Post-clone scripts** still run in lexical file name order.
 
@@ -300,7 +306,7 @@ dotnet run --project src/SqlClone.Console -- validate
 dotnet run --project src/SqlClone.Console -- teardown
 ```
 
-`generate-seed-config` emits a JSON `Seed` section with `Order` values computed from foreign-key dependency levels (parents before children), plus `GroupKey` values grouped by schema/domain to keep related tables together while still maximizing per-level parallelism. Generated entries default `LatestRows` to `10000` and now emit `LatestOrderBy` as that table's primary key columns in descending order when a primary key exists; child tables remain aligned to limited parent row sets through FK-aware filtering. Use `--target-database` to override target DB name and `--truncate-target false` if you want generated entries to keep existing rows.
+`generate-seed-config` emits a JSON `Seed` section with `Order` values computed from foreign-key dependency levels (parents before children), plus `GroupKey` values grouped by schema/domain to keep related tables together while still maximizing per-level parallelism. Root entries default `LatestRows` to `10000`, child entries default to full-copy (`LatestRows` unset), and `LatestOrderBy` is emitted from each table's primary key columns in descending order when a primary key exists. Generated output is nested using `Children` so parent/child intent is explicit in the config. Use `--target-database` to override target DB name and `--truncate-target false` if you want generated entries to keep existing rows.
 
 ## Known v1 limitations
 
