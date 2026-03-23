@@ -377,6 +377,7 @@ public sealed class SourceInspector : ISourceInspector
         var parentTable = candidateParent.Table;
         var childTableNormalized = childTable.ToLowerInvariant();
         var parentTableNormalized = parentTable.ToLowerInvariant();
+        var parentSingularNormalized = GetSingularTableStem(parentTableNormalized);
 
         var score = 0;
 
@@ -384,14 +385,27 @@ public sealed class SourceInspector : ISourceInspector
         {
             score += 100;
         }
+        else if (childTableNormalized.StartsWith(parentSingularNormalized + "_", StringComparison.Ordinal))
+        {
+            score += 90;
+        }
         else if (childTableNormalized.StartsWith(parentTableNormalized, StringComparison.Ordinal))
         {
             score += 50;
+        }
+        else if (childTableNormalized.StartsWith(parentSingularNormalized, StringComparison.Ordinal))
+        {
+            score += 45;
         }
         else if (childTableNormalized.Contains("_" + parentTableNormalized + "_", StringComparison.Ordinal)
             || childTableNormalized.EndsWith("_" + parentTableNormalized, StringComparison.Ordinal))
         {
             score += 20;
+        }
+        else if (childTableNormalized.Contains("_" + parentSingularNormalized + "_", StringComparison.Ordinal)
+            || childTableNormalized.EndsWith("_" + parentSingularNormalized, StringComparison.Ordinal))
+        {
+            score += 15;
         }
 
         if (child.Schema.Equals(candidateParent.Schema, StringComparison.OrdinalIgnoreCase))
@@ -400,6 +414,34 @@ public sealed class SourceInspector : ISourceInspector
         }
 
         return score;
+    }
+
+    private static string GetSingularTableStem(string tableNameNormalized)
+    {
+        if (tableNameNormalized.Length > 3 && tableNameNormalized.EndsWith("ies", StringComparison.Ordinal))
+        {
+            return tableNameNormalized[..^3] + "y";
+        }
+
+        if (tableNameNormalized.Length > 2
+            && tableNameNormalized.EndsWith("es", StringComparison.Ordinal)
+            && !tableNameNormalized.EndsWith("ses", StringComparison.Ordinal)
+            && !tableNameNormalized.EndsWith("xes", StringComparison.Ordinal)
+            && !tableNameNormalized.EndsWith("zes", StringComparison.Ordinal)
+            && !tableNameNormalized.EndsWith("ches", StringComparison.Ordinal)
+            && !tableNameNormalized.EndsWith("shes", StringComparison.Ordinal))
+        {
+            return tableNameNormalized[..^2];
+        }
+
+        if (tableNameNormalized.Length > 1
+            && tableNameNormalized.EndsWith("s", StringComparison.Ordinal)
+            && !tableNameNormalized.EndsWith("ss", StringComparison.Ordinal))
+        {
+            return tableNameNormalized[..^1];
+        }
+
+        return tableNameNormalized;
     }
 
     private static NestedTableNode BuildNestedTree(
