@@ -8,6 +8,11 @@ public sealed class ClonePlanFactory : IClonePlanFactory
     public ClonePlan CreatePlan(CloneOptions options, string? overrideEnvironment = null)
     {
         ArgumentNullException.ThrowIfNull(options);
+        var excludedSchemas = new HashSet<string>(
+            options.Seed.ExcludeSchemas
+                .Where(schema => !string.IsNullOrWhiteSpace(schema))
+                .Select(schema => schema.Trim()),
+            StringComparer.OrdinalIgnoreCase);
 
         return new ClonePlan
         {
@@ -36,7 +41,11 @@ public sealed class ClonePlanFactory : IClonePlanFactory
                 Order = table.Order,
                 GroupKey = table.GroupKey > 0 ? table.GroupKey : 1
             })
-            .Where(table => !string.IsNullOrWhiteSpace(table.SourceDatabase) && !string.IsNullOrWhiteSpace(table.TargetDatabase) && !string.IsNullOrWhiteSpace(table.Table))
+            .Where(table =>
+                !string.IsNullOrWhiteSpace(table.SourceDatabase)
+                && !string.IsNullOrWhiteSpace(table.TargetDatabase)
+                && !string.IsNullOrWhiteSpace(table.Table)
+                && !excludedSchemas.Contains(table.Schema))
             .OrderBy(table => table.Order)
             .ThenBy(table => table.GroupKey)
             .ThenBy(table => table.Schema)
