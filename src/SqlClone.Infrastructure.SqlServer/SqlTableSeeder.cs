@@ -487,7 +487,7 @@ public sealed class SqlTableSeeder : ITableSeeder
         var destinationName = $"[{escapedSchema}].[{escapedTable}]";
         var sourceName = $"[{EscapeIdentifier(linkedServerName)}].[{EscapeIdentifier(table.SourceDatabase)}].[{escapedSchema}].[{escapedTable}]";
         var escapedColumns = string.Join(", ", columnList.Select(c => $"[{EscapeIdentifier(c)}]"));
-        var orderByClause = BuildLinkedServerOrderByClause(columnList, table);
+        var orderByClause = await BuildLinkedServerOrderByClauseAsync(target, columnList, table, effectiveCancellationToken);
         var sourceSelectionSql = table.LatestRows is > 0
             ? $"SELECT TOP ({table.LatestRows.Value}) {escapedColumns} FROM {sourceName} ORDER BY {orderByClause}"
             : $"SELECT {escapedColumns} FROM {sourceName}";
@@ -598,13 +598,21 @@ ORDER BY ORDINAL_POSITION;";
         return columns;
     }
 
-    private static string BuildLinkedServerOrderByClause(
+    private static async Task<string> BuildLinkedServerOrderByClauseAsync(
+        SqlConnection target,
         IReadOnlyCollection<string> selectedColumns,
-        SeedTablePlan table)
+        SeedTablePlan table,
+        CancellationToken cancellationToken)
     {
         if (!string.IsNullOrWhiteSpace(table.LatestOrderBy))
         {
             return table.LatestOrderBy!;
+        }
+
+        var primaryKeys = await LoadPrimaryKeyColumnListAsync(target, table, cancellationToken);
+        if (primaryKeys.Count > 0)
+        {
+            return string.Join(", ", primaryKeys.Select(column => $"[{EscapeIdentifier(column)}] DESC"));
         }
 
         return selectedColumns
