@@ -2,10 +2,18 @@ namespace SqlClone.Domain.Models;
 
 public sealed class SeedOptions
 {
+    public string Strategy { get; set; } = SeedStrategy.BulkCopy;
+    public string LinkedServerName { get; set; } = string.Empty;
     public bool Enabled { get; set; }
     public string SourceDatabase { get; set; } = string.Empty;
     public List<string> ExcludeSchemas { get; set; } = [];
     public List<SeedTableOptions> Tables { get; set; } = [];
+}
+
+public static class SeedStrategy
+{
+    public const string BulkCopy = "BulkCopy";
+    public const string LinkedServer = "LinkedServer";
 }
 
 public sealed class SeedTableOptions

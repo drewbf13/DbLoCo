@@ -48,6 +48,8 @@ Important settings:
 - `Clone:Restore:Databases`
 - `Clone:Migration:Enabled` / (`GitRepository` or `LocalRepositoryPath`) / `Branch` / `BuildCommand`
 - `Clone:Seed:Enabled` / `SourceDatabase` / `Tables`
+  - Optional seeding strategy switch: `Clone:Seed:Strategy` (`BulkCopy` or `LinkedServer`)
+  - Linked-server strategy setting: `Clone:Seed:LinkedServerName`
 - `Clone:LinkedServers:Definitions`
   - Optional SQL auth mapping per linked server: `UserId` + `Password`
 - `Clone:PostClone:ScriptFolders`
@@ -301,21 +303,30 @@ Example:
 
 In this example, `AuditEvents` is limited to the latest 5,000 rows, while `ReferenceData` is copied in full.
 
-### Alternative seeding strategy: linked-server `SELECT INTO` / `INSERT SELECT`
+### Alternative seeding strategy: linked-server pushdown (with normal SqlClone logging)
 
-If you want seeding to happen entirely from the target SQL Server instance, you can configure your source as a SQL Server linked server and copy rows with four-part names.
+If you want seeding to execute through linked-server SQL on the target instance **and still use the normal SqlClone seeding pipeline/logging**, set:
 
-This repo includes an example script at `scripts/postclone/002-linked-server-seed-strategy.sql` that:
+```json
+"Seed": {
+  "Enabled": true,
+  "Strategy": "LinkedServer",
+  "LinkedServerName": "REMOTEDEV",
+  "SourceDatabase": "AppDb",
+  "Tables": [
+    {
+      "TargetDatabase": "AppDb",
+      "Schema": "dbo",
+      "Table": "ReferenceData",
+      "TruncateTarget": true
+    }
+  ]
+}
+```
 
-1. Creates `master.dbo.usp_SeedTableFromLinkedServer`.
-2. Reads source/target metadata and computes the **shared writable columns**.
-3. Uses `SELECT ... INTO` when the target table does not yet exist.
-4. Uses `INSERT INTO ... SELECT` when the target table already exists.
-5. Skips target computed columns and optionally includes identity columns (`@IncludeIdentity = 1`).
+With `Strategy: LinkedServer`, SqlClone still orchestrates seeding as usual (ordering/retries/logging), but each table seed operation stages rows with `SELECT ... INTO #temp` from the linked server and inserts into the target table using only shared writable columns.
 
-This column-intersection approach lets you seed safely when source and target schemas are not identical (for example target has extra columns, computed columns, or source has extra legacy columns).
-
-At a high level, the strategy looks like:
+At a high level, linked-server pushdown uses patterns like:
 
 ```sql
 -- source metadata
@@ -330,12 +341,18 @@ JOIN [AppDb].sys.tables t ON c.object_id = t.object_id
 JOIN [AppDb].sys.schemas s ON t.schema_id = s.schema_id
 WHERE s.name = 'dbo' AND t.name = 'ReferenceData';
 
--- then dynamically execute one of:
--- SELECT shared_columns INTO [AppDb].[dbo].[ReferenceData] FROM [SOURCE_LINKED].[AppDb].[dbo].[ReferenceData];
--- INSERT INTO [AppDb].[dbo].[ReferenceData](shared_columns) SELECT shared_columns FROM [SOURCE_LINKED].[AppDb].[dbo].[ReferenceData];
+-- stage source rows server-side
+SELECT shared_columns
+INTO #Seed_ReferenceData
+FROM [SOURCE_LINKED].[AppDb].[dbo].[ReferenceData];
+
+-- then insert into target with shared columns only
+INSERT INTO [AppDb].[dbo].[ReferenceData](shared_columns)
+SELECT shared_columns
+FROM #Seed_ReferenceData;
 ```
 
-Run the provided script manually, or add it to your post-clone script folder if you want it executed as part of `clone`.
+This keeps the linked-server path inside the same `clone`/seed execution path so you still get structured table-level progress logs.
 
 ## Commands
 
