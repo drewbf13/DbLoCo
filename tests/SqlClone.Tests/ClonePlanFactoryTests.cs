@@ -89,4 +89,48 @@ public sealed class ClonePlanFactoryTests
         plan.SeedTables[0].Schema.Should().Be("dbo");
         plan.SeedTables[0].Table.Should().Be("Users");
     }
+
+    [Fact]
+    public void FlattensNestedSeedTableConfigurationAndInheritsParentDefaults()
+    {
+        var options = new CloneOptions
+        {
+            EnvironmentName = "Dev",
+            Restore = new RestoreOptions { Materializer = "CreateEmpty", Databases = ["AppDb"] },
+            Seed = new SeedOptions
+            {
+                Enabled = true,
+                SourceDatabase = "AppDb",
+                Tables =
+                [
+                    new SeedTableOptions
+                    {
+                        Schema = "dbo",
+                        Table = "Parent",
+                        Order = 10,
+                        GroupKey = 3,
+                        LatestRows = 25,
+                        Children =
+                        [
+                            new SeedTableOptions { Table = "Child" }
+                        ]
+                    }
+                ]
+            }
+        };
+
+        var factory = new ClonePlanFactory();
+
+        var plan = factory.CreatePlan(options);
+
+        plan.SeedTables.Should().HaveCount(2);
+        plan.SeedTables[0].Table.Should().Be("Parent");
+        plan.SeedTables[0].LatestRows.Should().Be(25);
+        plan.SeedTables[1].Table.Should().Be("Child");
+        plan.SeedTables[1].SourceDatabase.Should().Be("AppDb");
+        plan.SeedTables[1].TargetDatabase.Should().Be("AppDb");
+        plan.SeedTables[1].Schema.Should().Be("dbo");
+        plan.SeedTables[1].Order.Should().Be(10);
+        plan.SeedTables[1].GroupKey.Should().Be(3);
+    }
 }

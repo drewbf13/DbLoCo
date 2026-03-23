@@ -250,13 +250,18 @@ public sealed class SqlTableSeeder : ITableSeeder
         }
 
         var escapedColumns = string.Join(", ", columnList.Select(c => $"[{EscapeIdentifier(c)}]"));
-        var sourceFromClause = await BuildSourceFromClauseAsync(source, table, effectiveCancellationToken);
-        var fkRelationships = await LoadForeignKeyRelationshipsAsync(source, table, effectiveCancellationToken);
-        var sourceFilterClause = await BuildSourceFilterClauseAsync(source, table, planLookup, fkRelationships, effectiveCancellationToken);
-        var sourceQuery = $"SELECT {escapedColumns} FROM {sourceFromClause}{sourceFilterClause};";
+        var selectionCache = new Dictionary<TableRefKey, TableSelectionQuery>();
+        var sourceSelection = await BuildTableSelectionQueryAsync(
+            source,
+            table,
+            planLookup,
+            selectionCache,
+            new HashSet<TableRefKey>(),
+            effectiveCancellationToken);
+        var sourceQuery = $"SELECT {escapedColumns} FROM ({sourceSelection.Sql}) AS [src];";
         var estimatedRowSizeBytes = await EstimateRowSizeBytesAsync(source, table, columnList, effectiveCancellationToken);
         var bulkCopyBatchSize = ComputeBulkCopyBatchSize(estimatedRowSizeBytes);
-        var expectedSourceRowCount = await LoadSourceRowCountAsync(source, sourceFromClause, sourceFilterClause, effectiveCancellationToken);
+        var expectedSourceRowCount = await LoadSourceRowCountAsync(source, sourceSelection.Sql, effectiveCancellationToken);
         await using var sourceCommand = source.CreateCommand();
         sourceCommand.CommandText = sourceQuery;
         sourceCommand.CommandTimeout = SeedSourceQueryTimeoutSeconds;
@@ -395,12 +400,11 @@ ORDER BY ORDINAL_POSITION;";
 
     private static async Task<long> LoadSourceRowCountAsync(
         SqlConnection source,
-        string sourceFromClause,
-        string sourceFilterClause,
+        string sourceSelectionSql,
         CancellationToken cancellationToken)
     {
         await using var rowCountCommand = source.CreateCommand();
-        rowCountCommand.CommandText = $"SELECT COUNT_BIG(*) FROM {sourceFromClause}{sourceFilterClause};";
+        rowCountCommand.CommandText = $"SELECT COUNT_BIG(*) FROM ({sourceSelectionSql}) AS [src];";
         rowCountCommand.CommandTimeout = SeedSourceQueryTimeoutSeconds;
 
         var rowCount = await rowCountCommand.ExecuteScalarAsync(cancellationToken);
@@ -520,63 +524,101 @@ WHERE TABLE_SCHEMA = @schema
         return columns;
     }
 
-    private async Task<string> BuildSourceFilterClauseAsync(
+    private async Task<TableSelectionQuery> BuildTableSelectionQueryAsync(
         SqlConnection source,
         SeedTablePlan table,
         IReadOnlyDictionary<TableRefKey, SeedTablePlan> planLookup,
-        IReadOnlyList<ForeignKeyRelationship> fkRelationships,
+        IDictionary<TableRefKey, TableSelectionQuery> selectionCache,
+        ISet<TableRefKey> recursionStack,
         CancellationToken cancellationToken)
     {
-        var clauses = new List<string>();
-
-        foreach (var relationship in fkRelationships)
+        var tableKey = TableRefKey.Create(table.SourceDatabase, table.Schema, table.Table);
+        if (selectionCache.TryGetValue(tableKey, out var cachedSelection))
         {
-            var parentKey = TableRefKey.Create(table.SourceDatabase, relationship.ReferencedSchema, relationship.ReferencedTable);
-            if (!planLookup.TryGetValue(parentKey, out var parentPlan) || parentPlan.LatestRows is not > 0)
+            return cachedSelection;
+        }
+
+        if (!recursionStack.Add(tableKey))
+        {
+            throw new InvalidOperationException(
+                $"Detected cyclic dependency while building recursive seed filter for {table.SourceDatabase}.{table.Schema}.{table.Table}.");
+        }
+
+        try
+        {
+            var sourceTableName = $"[{EscapeIdentifier(table.Schema)}].[{EscapeIdentifier(table.Table)}]";
+            var fkRelationships = await LoadForeignKeyRelationshipsAsync(source, table, cancellationToken);
+            var nullableChildColumns = await LoadNullableColumnLookupAsync(source, table, cancellationToken);
+            var inheritedClauses = new List<string>();
+
+            foreach (var relationship in fkRelationships)
             {
-                continue;
-            }
+                var parentKey = TableRefKey.Create(table.SourceDatabase, relationship.ReferencedSchema, relationship.ReferencedTable);
+                if (!planLookup.TryGetValue(parentKey, out var parentPlan))
+                {
+                    continue;
+                }
 
-            var parentOrderByClause = await ResolveLatestOrderByClauseAsync(source, parentPlan, cancellationToken);
-            var parentColumns = string.Join(", ", relationship.ColumnPairs.Select(pair => $"[{EscapeIdentifier(pair.ParentColumn)}]"));
-            var joinPredicate = string.Join(
-                " AND ",
-                relationship.ColumnPairs.Select(pair =>
-                    $"[p].[{EscapeIdentifier(pair.ParentColumn)}] = [src].[{EscapeIdentifier(pair.ChildColumn)}]"));
+                var parentSelection = await BuildTableSelectionQueryAsync(
+                    source,
+                    parentPlan,
+                    planLookup,
+                    selectionCache,
+                    recursionStack,
+                    cancellationToken);
 
-            clauses.Add(
-                $@"EXISTS (
+                if (!parentSelection.IsConstrained)
+                {
+                    continue;
+                }
+
+                var parentColumns = string.Join(", ", relationship.ColumnPairs.Select(pair => $"[parent].[{EscapeIdentifier(pair.ParentColumn)}]"));
+                var joinPredicate = string.Join(
+                    " AND ",
+                    relationship.ColumnPairs.Select(pair =>
+                        $"[keys].[{EscapeIdentifier(pair.ParentColumn)}] = [src].[{EscapeIdentifier(pair.ChildColumn)}]"));
+                var nullableBypassPredicate = string.Join(
+                    " OR ",
+                    relationship.ColumnPairs
+                        .Where(pair => nullableChildColumns.Contains(pair.ChildColumn))
+                        .Select(pair => $"[src].[{EscapeIdentifier(pair.ChildColumn)}] IS NULL"));
+
+                var existsClause =
+                    $@"EXISTS (
     SELECT 1
     FROM (
-        SELECT TOP ({parentPlan.LatestRows.Value}) {parentColumns}
-        FROM [{EscapeIdentifier(parentPlan.Schema)}].[{EscapeIdentifier(parentPlan.Table)}]
-        ORDER BY {parentOrderByClause}
-    ) AS [p]
+        SELECT DISTINCT {parentColumns}
+        FROM ({parentSelection.Sql}) AS [parent]
+    ) AS [keys]
     WHERE {joinPredicate}
-)");
-        }
+)";
 
-        if (clauses.Count == 0)
+                inheritedClauses.Add(string.IsNullOrWhiteSpace(nullableBypassPredicate)
+                    ? existsClause
+                    : $"({nullableBypassPredicate} OR {existsClause})");
+            }
+
+            var whereClause = inheritedClauses.Count == 0
+                ? string.Empty
+                : $"{Environment.NewLine}WHERE {string.Join($"{Environment.NewLine}  AND ", inheritedClauses)}";
+            var filteredSourceSql = $"SELECT * FROM {sourceTableName} AS [src]{whereClause}";
+
+            var hasLocalLimit = table.LatestRows is > 0;
+            var selectionSql = filteredSourceSql;
+            if (hasLocalLimit)
+            {
+                var orderByClause = await ResolveLatestOrderByClauseAsync(source, table, cancellationToken);
+                selectionSql = $"SELECT TOP ({table.LatestRows!.Value}) * FROM ({filteredSourceSql}) AS [limited] ORDER BY {orderByClause}";
+            }
+
+            var selection = new TableSelectionQuery(selectionSql, hasLocalLimit || inheritedClauses.Count > 0);
+            selectionCache[tableKey] = selection;
+            return selection;
+        }
+        finally
         {
-            return string.Empty;
+            recursionStack.Remove(tableKey);
         }
-
-        return $"{Environment.NewLine}WHERE {string.Join($"{Environment.NewLine}  AND ", clauses)}";
-    }
-
-    private static async Task<string> BuildSourceFromClauseAsync(
-        SqlConnection source,
-        SeedTablePlan table,
-        CancellationToken cancellationToken)
-    {
-        var tableName = $"[{EscapeIdentifier(table.Schema)}].[{EscapeIdentifier(table.Table)}]";
-        if (table.LatestRows is not > 0)
-        {
-            return $"{tableName} AS [src]";
-        }
-
-        var orderByClause = await ResolveLatestOrderByClauseAsync(source, table, cancellationToken);
-        return $"(SELECT TOP ({table.LatestRows.Value}) * FROM {tableName} ORDER BY {orderByClause}) AS [src]";
     }
 
     private static async Task<IReadOnlyList<ForeignKeyRelationship>> LoadForeignKeyRelationshipsAsync(
@@ -623,6 +665,34 @@ ORDER BY fk.name, fkc.constraint_column_id;";
         }
 
         return relationships.Values.ToList();
+    }
+
+    private static async Task<IReadOnlySet<string>> LoadNullableColumnLookupAsync(
+        SqlConnection source,
+        SeedTablePlan table,
+        CancellationToken cancellationToken)
+    {
+        const string sql = @"
+SELECT COLUMN_NAME
+FROM INFORMATION_SCHEMA.COLUMNS
+WHERE TABLE_SCHEMA = @schema
+  AND TABLE_NAME = @table
+  AND IS_NULLABLE = 'YES';";
+
+        await using var command = source.CreateCommand();
+        command.CommandText = sql;
+        command.CommandTimeout = MetadataQueryTimeoutSeconds;
+        command.Parameters.AddWithValue("@schema", table.Schema);
+        command.Parameters.AddWithValue("@table", table.Table);
+
+        var nullableColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            nullableColumns.Add(reader.GetString(0));
+        }
+
+        return nullableColumns;
     }
 
     private static async Task<string> ResolveLatestOrderByClauseAsync(
@@ -834,6 +904,7 @@ SET IDENTITY_INSERT {destinationName} OFF;";
         List<ForeignKeyColumnPair> ColumnPairs);
 
     private sealed record ForeignKeyColumnPair(string ChildColumn, string ParentColumn);
+    private sealed record TableSelectionQuery(string Sql, bool IsConstrained);
 
     private static string EscapeIdentifier(string value) => value.Replace("]", "]]", StringComparison.Ordinal);
 }

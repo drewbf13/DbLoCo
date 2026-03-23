@@ -19,4 +19,5 @@ public sealed class SeedTableOptions
     public string? LatestOrderBy { get; set; }
     public int Order { get; set; }
     public int GroupKey { get; set; }
+    public List<SeedTableOptions> Children { get; set; } = [];
 }

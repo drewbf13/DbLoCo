@@ -33,6 +33,7 @@ public sealed class OptionsBindingTests
                 ["Clone:Seed:Tables:0:LatestOrderBy"] = "[CreatedUtc] DESC, [Id] DESC",
                 ["Clone:Seed:Tables:0:Order"] = "20",
                 ["Clone:Seed:Tables:0:GroupKey"] = "2",
+                ["Clone:Seed:Tables:0:Children:0:Table"] = "LookupChild",
                 ["Clone:LinkedServers:Definitions:0:Name"] = "REMOTEDEV",
                 ["Clone:LinkedServers:Definitions:0:DataSource"] = "remote-server.example.local",
                 ["Clone:LinkedServers:Definitions:0:UserId"] = "linked_user",
@@ -61,6 +62,8 @@ public sealed class OptionsBindingTests
         options.Seed.Tables[0].GroupKey.Should().Be(2);
         options.Seed.Tables[0].LatestRows.Should().Be(5000);
         options.Seed.Tables[0].LatestOrderBy.Should().Be("[CreatedUtc] DESC, [Id] DESC");
+        options.Seed.Tables[0].Children.Should().ContainSingle();
+        options.Seed.Tables[0].Children[0].Table.Should().Be("LookupChild");
         options.LinkedServers.Definitions.Should().ContainSingle();
         options.LinkedServers.Definitions[0].UserId.Should().Be("linked_user");
         options.LinkedServers.Definitions[0].Password.Should().Be("linked_password");

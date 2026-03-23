@@ -64,22 +64,19 @@ public sealed class SourceInspector : ISourceInspector
         var primaryKeyColumnsByTable = await GetPrimaryKeyColumnsByTableAsync(connection, cancellationToken);
         var dependencyGroups = TopologicalGroupTables(tables, foreignKeyDependencies);
         var domainGroupKeys = BuildDomainGroupKeys(tables);
+        var orderByTableKey = BuildOrderByTableKey(dependencyGroups);
+        var nestedTableNodes = BuildNestedSeedTableNodes(tables, foreignKeyDependencies, orderByTableKey);
 
-        var seedTables = dependencyGroups
-            .SelectMany((group, groupIndex) => group
-                .OrderBy(table => table.Key, StringComparer.OrdinalIgnoreCase)
-                .Select(table => new SeedTableOptions
-                {
-                    SourceDatabase = sourceDatabase,
-                    TargetDatabase = targetDatabase,
-                    Schema = table.Schema,
-                    Table = table.Table,
-                    TruncateTarget = truncateTarget,
-                    LatestRows = DefaultLatestRowsLimit,
-                    LatestOrderBy = BuildPrimaryKeyDescendingOrderByClause(primaryKeyColumnsByTable, table),
-                    GroupKey = domainGroupKeys[table.Schema],
-                    Order = (groupIndex + 1) * 10
-                }))
+        var seedTables = nestedTableNodes
+            .Select(table => BuildSeedTableOptionsTree(
+                table,
+                sourceDatabase,
+                targetDatabase,
+                truncateTarget,
+                primaryKeyColumnsByTable,
+                domainGroupKeys,
+                orderByTableKey,
+                applyDefaultLimit: true))
             .ToList();
 
         var payload = new
@@ -286,10 +283,142 @@ public sealed class SourceInspector : ISourceInspector
             .ToDictionary(item => item.schema, item => item.key, StringComparer.OrdinalIgnoreCase);
     }
 
+    private static Dictionary<string, int> BuildOrderByTableKey(IReadOnlyList<IReadOnlyList<TableNode>> dependencyGroups)
+    {
+        var orderByTableKey = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        for (var groupIndex = 0; groupIndex < dependencyGroups.Count; groupIndex++)
+        {
+            var order = (groupIndex + 1) * 10;
+            foreach (var table in dependencyGroups[groupIndex])
+            {
+                orderByTableKey[table.Key] = order;
+            }
+        }
+
+        return orderByTableKey;
+    }
+
+    private static List<NestedTableNode> BuildNestedSeedTableNodes(
+        IReadOnlyList<TableNode> tables,
+        IReadOnlyList<ForeignKeyDependency> dependencies,
+        IReadOnlyDictionary<string, int> orderByTableKey)
+    {
+        var tableByKey = tables.ToDictionary(table => table.Key, table => table, StringComparer.OrdinalIgnoreCase);
+        var parentCandidatesByChild = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var dependency in dependencies)
+        {
+            if (!tableByKey.ContainsKey(dependency.Parent.Key) || !tableByKey.ContainsKey(dependency.Referenced.Key))
+            {
+                continue;
+            }
+
+            if (dependency.Parent.Key.Equals(dependency.Referenced.Key, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (!parentCandidatesByChild.TryGetValue(dependency.Parent.Key, out var candidates))
+            {
+                candidates = [];
+                parentCandidatesByChild.Add(dependency.Parent.Key, candidates);
+            }
+
+            candidates.Add(dependency.Referenced.Key);
+        }
+
+        var selectedParentByChild = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (childKey, candidateParentKeys) in parentCandidatesByChild)
+        {
+            var selectedParentKey = candidateParentKeys
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(parentKey => orderByTableKey.TryGetValue(parentKey, out var order) ? order : int.MaxValue)
+                .ThenBy(parentKey => parentKey, StringComparer.OrdinalIgnoreCase)
+                .First();
+            selectedParentByChild[childKey] = selectedParentKey;
+        }
+
+        var childrenByParent = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (childKey, parentKey) in selectedParentByChild)
+        {
+            if (!childrenByParent.TryGetValue(parentKey, out var childList))
+            {
+                childList = [];
+                childrenByParent.Add(parentKey, childList);
+            }
+
+            childList.Add(childKey);
+        }
+
+        var rootKeys = tables
+            .Select(table => table.Key)
+            .Where(key => !selectedParentByChild.ContainsKey(key))
+            .OrderBy(key => orderByTableKey.TryGetValue(key, out var order) ? order : int.MaxValue)
+            .ThenBy(key => key, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        return rootKeys
+            .Select(rootKey => BuildNestedTree(rootKey, tableByKey, childrenByParent, orderByTableKey))
+            .ToList();
+    }
+
+    private static NestedTableNode BuildNestedTree(
+        string tableKey,
+        IReadOnlyDictionary<string, TableNode> tableByKey,
+        IReadOnlyDictionary<string, List<string>> childrenByParent,
+        IReadOnlyDictionary<string, int> orderByTableKey)
+    {
+        var childNodes = childrenByParent.TryGetValue(tableKey, out var childKeys)
+            ? childKeys
+                .OrderBy(key => orderByTableKey.TryGetValue(key, out var order) ? order : int.MaxValue)
+                .ThenBy(key => key, StringComparer.OrdinalIgnoreCase)
+                .Select(childKey => BuildNestedTree(childKey, tableByKey, childrenByParent, orderByTableKey))
+                .ToList()
+            : [];
+
+        return new NestedTableNode(tableByKey[tableKey], childNodes);
+    }
+
+    private static SeedTableOptions BuildSeedTableOptionsTree(
+        NestedTableNode node,
+        string sourceDatabase,
+        string targetDatabase,
+        bool truncateTarget,
+        IReadOnlyDictionary<string, List<string>> primaryKeyColumnsByTable,
+        IReadOnlyDictionary<string, int> domainGroupKeys,
+        IReadOnlyDictionary<string, int> orderByTableKey,
+        bool applyDefaultLimit)
+    {
+        return new SeedTableOptions
+        {
+            SourceDatabase = sourceDatabase,
+            TargetDatabase = targetDatabase,
+            Schema = node.Table.Schema,
+            Table = node.Table.Table,
+            TruncateTarget = truncateTarget,
+            LatestRows = applyDefaultLimit ? DefaultLatestRowsLimit : null,
+            LatestOrderBy = BuildPrimaryKeyDescendingOrderByClause(primaryKeyColumnsByTable, node.Table),
+            GroupKey = domainGroupKeys[node.Table.Schema],
+            Order = orderByTableKey[node.Table.Key],
+            Children = node.Children
+                .Select(child => BuildSeedTableOptionsTree(
+                    child,
+                    sourceDatabase,
+                    targetDatabase,
+                    truncateTarget,
+                    primaryKeyColumnsByTable,
+                    domainGroupKeys,
+                    orderByTableKey,
+                    applyDefaultLimit: false))
+                .ToList()
+        };
+    }
+
     private sealed record TableNode(string Schema, string Table)
     {
         public string Key => $"{Schema}.{Table}";
     }
 
     private sealed record ForeignKeyDependency(TableNode Parent, TableNode Referenced);
+    private sealed record NestedTableNode(TableNode Table, List<NestedTableNode> Children);
 }
