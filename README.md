@@ -168,6 +168,7 @@ Example:
 "Seed": {
   "Enabled": true,
   "SourceDatabase": "AppDb",
+  "ExcludeSchemas": [],
   "Tables": [
     {
       "SourceDatabase": "AppDb",
@@ -243,6 +244,7 @@ Ordering notes:
 - **Seed ordering** is controlled by `Clone:Seed:Tables[*]:Order` (ascending). Tables in the same order value are seeded in parallel.
 - **Seed grouping metadata** is provided by `Clone:Seed:Tables[*]:GroupKey` (for example domain/schema lanes in generated config) and is used as a deterministic tie-breaker.
 - **Seed row limiting** can be configured with `Clone:Seed:Tables[*]:LatestRows` plus optional `LatestOrderBy` (defaults to primary key descending). Child tables that reference limited parent tables are automatically filtered to rows whose foreign keys exist in the parent's selected latest set.
+- **Schema exclusion** can be configured with `Clone:Seed:ExcludeSchemas` to skip seeding all tables from listed schemas.
 - **Post-clone scripts** still run in lexical file name order.
 
 ### Selective Top N seeding per table
@@ -259,6 +261,7 @@ Example:
 "Seed": {
   "Enabled": true,
   "SourceDatabase": "AppDb",
+  "ExcludeSchemas": [ "audit" ],
   "Tables": [
     {
       "SourceDatabase": "AppDb",
@@ -297,7 +300,7 @@ dotnet run --project src/SqlClone.Console -- validate
 dotnet run --project src/SqlClone.Console -- teardown
 ```
 
-`generate-seed-config` emits a JSON `Seed` section with `Order` values computed from foreign-key dependency levels (parents before children), plus `GroupKey` values grouped by schema/domain to keep related tables together while still maximizing per-level parallelism. Use `--target-database` to override target DB name and `--truncate-target false` if you want generated entries to keep existing rows.
+`generate-seed-config` emits a JSON `Seed` section with `Order` values computed from foreign-key dependency levels (parents before children), plus `GroupKey` values grouped by schema/domain to keep related tables together while still maximizing per-level parallelism. Generated entries default `LatestRows` to `10000` and now emit `LatestOrderBy` as that table's primary key columns in descending order when a primary key exists; child tables remain aligned to limited parent row sets through FK-aware filtering. Use `--target-database` to override target DB name and `--truncate-target false` if you want generated entries to keep existing rows.
 
 ## Known v1 limitations
 

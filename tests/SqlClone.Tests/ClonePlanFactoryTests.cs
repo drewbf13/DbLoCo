@@ -59,4 +59,34 @@ public sealed class ClonePlanFactoryTests
         plan.SeedTables[1].LatestRows.Should().Be(100);
         plan.SeedTables[1].LatestOrderBy.Should().Be("[Id] DESC");
     }
+
+    [Fact]
+    public void ExcludesTablesFromConfiguredSchemas()
+    {
+        var options = new CloneOptions
+        {
+            EnvironmentName = "Dev",
+            Restore = new RestoreOptions { Materializer = "CreateEmpty", Databases = ["AppDb"] },
+            Seed = new SeedOptions
+            {
+                Enabled = true,
+                SourceDatabase = "AppDb",
+                ExcludeSchemas = ["audit"],
+                Tables =
+                [
+                    new SeedTableOptions { Schema = "dbo", Table = "Users", Order = 10, GroupKey = 1 },
+                    new SeedTableOptions { Schema = "audit", Table = "AuditEvents", Order = 20, GroupKey = 1 },
+                    new SeedTableOptions { Schema = "AUDIT", Table = "AuditChanges", Order = 30, GroupKey = 1 }
+                ]
+            }
+        };
+
+        var factory = new ClonePlanFactory();
+
+        var plan = factory.CreatePlan(options);
+
+        plan.SeedTables.Should().ContainSingle();
+        plan.SeedTables[0].Schema.Should().Be("dbo");
+        plan.SeedTables[0].Table.Should().Be("Users");
+    }
 }

@@ -25,6 +25,7 @@ public sealed class OptionsBindingTests
                 ["Clone:Migration:BuildCommand"] = "dotnet run",
                 ["Clone:Seed:Enabled"] = "true",
                 ["Clone:Seed:SourceDatabase"] = "DbOne",
+                ["Clone:Seed:ExcludeSchemas:0"] = "audit",
                 ["Clone:Seed:Tables:0:Table"] = "Lookup",
                 ["Clone:Seed:Tables:0:Schema"] = "dbo",
                 ["Clone:Seed:Tables:0:TruncateTarget"] = "true",
@@ -54,6 +55,7 @@ public sealed class OptionsBindingTests
         options.Migration.LocalRepositoryPath.Should().Be("C:\\repos\\migrations");
         options.Migration.Branch.Should().Be("dev");
         options.Seed.Enabled.Should().BeTrue();
+        options.Seed.ExcludeSchemas.Should().ContainSingle().Which.Should().Be("audit");
         options.Seed.Tables.Should().ContainSingle();
         options.Seed.Tables[0].Order.Should().Be(20);
         options.Seed.Tables[0].GroupKey.Should().Be(2);

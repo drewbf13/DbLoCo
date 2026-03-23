@@ -8,6 +8,7 @@ namespace SqlClone.Infrastructure.SqlServer;
 public sealed class SourceInspector : ISourceInspector
 {
     private const int MaxOpenAttempts = 3;
+    private const int DefaultLatestRowsLimit = 10_000;
     private readonly SqlConnectionFactory _factory;
     private readonly ILogger<SourceInspector> _logger;
 
@@ -60,6 +61,7 @@ public sealed class SourceInspector : ISourceInspector
 
         var tables = await GetUserTablesAsync(connection, cancellationToken);
         var foreignKeyDependencies = await GetForeignKeyDependenciesAsync(connection, cancellationToken);
+        var primaryKeyColumnsByTable = await GetPrimaryKeyColumnsByTableAsync(connection, cancellationToken);
         var dependencyGroups = TopologicalGroupTables(tables, foreignKeyDependencies);
         var domainGroupKeys = BuildDomainGroupKeys(tables);
 
@@ -73,6 +75,8 @@ public sealed class SourceInspector : ISourceInspector
                     Schema = table.Schema,
                     Table = table.Table,
                     TruncateTarget = truncateTarget,
+                    LatestRows = DefaultLatestRowsLimit,
+                    LatestOrderBy = BuildPrimaryKeyDescendingOrderByClause(primaryKeyColumnsByTable, table),
                     GroupKey = domainGroupKeys[table.Schema],
                     Order = (groupIndex + 1) * 10
                 }))
@@ -141,6 +145,62 @@ public sealed class SourceInspector : ISourceInspector
 
         return dependencies;
     }
+
+    private static async Task<Dictionary<string, List<string>>> GetPrimaryKeyColumnsByTableAsync(
+        Microsoft.Data.SqlClient.SqlConnection connection,
+        CancellationToken cancellationToken)
+    {
+        const string sql = """
+            SELECT
+                c.TABLE_SCHEMA,
+                c.TABLE_NAME,
+                k.COLUMN_NAME
+            FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS c
+            INNER JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE k
+                ON c.CONSTRAINT_NAME = k.CONSTRAINT_NAME
+               AND c.TABLE_SCHEMA = k.TABLE_SCHEMA
+               AND c.TABLE_NAME = k.TABLE_NAME
+            WHERE c.CONSTRAINT_TYPE = 'PRIMARY KEY'
+            ORDER BY c.TABLE_SCHEMA, c.TABLE_NAME, k.ORDINAL_POSITION;
+            """;
+
+        var primaryKeyColumnsByTable = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var tableKey = $"{reader.GetString(0)}.{reader.GetString(1)}";
+            if (!primaryKeyColumnsByTable.TryGetValue(tableKey, out var columns))
+            {
+                columns = [];
+                primaryKeyColumnsByTable.Add(tableKey, columns);
+            }
+
+            columns.Add(reader.GetString(2));
+        }
+
+        return primaryKeyColumnsByTable;
+    }
+
+    private static string? BuildPrimaryKeyDescendingOrderByClause(
+        IReadOnlyDictionary<string, List<string>> primaryKeyColumnsByTable,
+        TableNode table)
+    {
+        if (!primaryKeyColumnsByTable.TryGetValue(table.Key, out var primaryKeyColumns) || primaryKeyColumns.Count == 0)
+        {
+            return null;
+        }
+
+        return BuildDescendingOrderByClause(primaryKeyColumns);
+    }
+
+    internal static string BuildDescendingOrderByClause(IEnumerable<string> columns)
+        => string.Join(", ", columns.Select(column => $"[{EscapeIdentifier(column)}] DESC"));
+
+    private static string EscapeIdentifier(string value)
+        => value.Replace("]", "]]", StringComparison.Ordinal);
 
     private static List<List<TableNode>> TopologicalGroupTables(
         IReadOnlyList<TableNode> tables,
