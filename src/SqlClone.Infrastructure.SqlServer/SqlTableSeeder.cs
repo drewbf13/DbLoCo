@@ -135,6 +135,7 @@ public sealed class SqlTableSeeder : ITableSeeder
         CancellationToken cancellationToken)
     {
         const bool allowRetry = true;
+        var maxInheritedParentFiltersForAttempt = MaxInheritedParentFilters;
 
         for (var attempt = 1; attempt <= MaxSeedAttempts; attempt++)
         {
@@ -142,7 +143,7 @@ public sealed class SqlTableSeeder : ITableSeeder
 
             try
             {
-                await SeedTableAsync(table, planLookup, cancellationToken);
+                await SeedTableAsync(table, planLookup, maxInheritedParentFiltersForAttempt, cancellationToken);
                 return true;
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && attempt < MaxSeedAttempts)
@@ -186,6 +187,24 @@ public sealed class SqlTableSeeder : ITableSeeder
 
                 await Task.Delay(delay, cancellationToken);
             }
+            catch (Exception ex) when (allowRetry && attempt < MaxSeedAttempts && IsForeignKeyConstraintViolation(ex))
+            {
+                maxInheritedParentFiltersForAttempt = Math.Min(
+                    int.MaxValue,
+                    maxInheritedParentFiltersForAttempt + MaxInheritedParentFilters);
+                _logger.LogWarning(
+                    ex,
+                    "Foreign key constraint violation while seeding {SourceDatabase}.{Schema}.{Table} -> {TargetDatabase}.{Schema}.{Table} (attempt {Attempt}/{MaxAttempts}). Retrying with inherited parent filter limit increased to {MaxInheritedParentFilters}.",
+                    table.SourceDatabase,
+                    table.Schema,
+                    table.Table,
+                    table.TargetDatabase,
+                    table.Schema,
+                    table.Table,
+                    attempt,
+                    MaxSeedAttempts,
+                    maxInheritedParentFiltersForAttempt);
+            }
             catch (Exception ex)
             {
                 _logger.LogWarning(
@@ -220,9 +239,23 @@ public sealed class SqlTableSeeder : ITableSeeder
         SqlClientTransientRetry.IsTransientTransportError(exception)
         || SqlClientTransientRetry.IsTransientSqlError(exception);
 
+    private static bool IsForeignKeyConstraintViolation(Exception exception)
+    {
+        for (var current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is SqlException sqlException && sqlException.Number == 547)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private async Task SeedTableAsync(
         SeedTablePlan table,
         IReadOnlyDictionary<TableRefKey, SeedTablePlan> planLookup,
+        int maxInheritedParentFilters,
         CancellationToken cancellationToken)
     {
         using var attemptTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -274,6 +307,7 @@ public sealed class SqlTableSeeder : ITableSeeder
             planLookup,
             selectionCache,
             new HashSet<TableRefKey>(),
+            maxInheritedParentFilters,
             effectiveCancellationToken);
         var sourceQuery = $"SELECT {escapedColumns} FROM ({sourceSelection.Sql}) AS [src];";
         var estimatedRowSizeBytes = await EstimateRowSizeBytesAsync(source, table, columnList, effectiveCancellationToken);
@@ -547,6 +581,7 @@ WHERE TABLE_SCHEMA = @schema
         IReadOnlyDictionary<TableRefKey, SeedTablePlan> planLookup,
         IDictionary<TableRefKey, TableSelectionQuery> selectionCache,
         ISet<TableRefKey> recursionStack,
+        int maxInheritedParentFilters,
         CancellationToken cancellationToken)
     {
         var tableKey = TableRefKey.Create(table.SourceDatabase, table.Schema, table.Table);
@@ -582,6 +617,7 @@ WHERE TABLE_SCHEMA = @schema
                     planLookup,
                     selectionCache,
                     recursionStack,
+                    maxInheritedParentFilters,
                     cancellationToken);
 
                 if (!parentSelection.IsConstrained)
@@ -623,7 +659,7 @@ WHERE TABLE_SCHEMA = @schema
                         nullableChildColumns)));
             }
 
-            var selectedInheritedClauses = SelectInheritedParentFilters(inheritedClauses, MaxInheritedParentFilters);
+            var selectedInheritedClauses = SelectInheritedParentFilters(inheritedClauses, maxInheritedParentFilters);
             if (inheritedClauses.Count > selectedInheritedClauses.Count)
             {
                 _logger.LogWarning(
