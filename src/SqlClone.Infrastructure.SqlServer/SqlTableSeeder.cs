@@ -46,9 +46,20 @@ public sealed class SqlTableSeeder : ITableSeeder
 
         _logger.LogInformation("Starting seed for {TotalTables} table(s).", totalTables);
 
-        foreach (var dependencyLevel in tables.GroupBy(table => table.Order > 0 ? table.Order : table.GroupKey).OrderBy(group => group.Key))
+        var dependencyLevels = tables
+            .GroupBy(table => table.Order > 0 ? table.Order : table.GroupKey)
+            .OrderBy(group => group.Key)
+            .ToList();
+
+        foreach (var dependencyLevel in dependencyLevels)
         {
             cancellationToken.ThrowIfCancellationRequested();
+
+            _logger.LogInformation(
+                "Starting seed dependency level {LevelKey} ({TableCount} table(s), max parallel {MaxParallel}).",
+                dependencyLevel.Key,
+                dependencyLevel.Count(),
+                MaxConcurrentSeedOperationsPerLevel);
 
             using var concurrencyGate = new SemaphoreSlim(MaxConcurrentSeedOperationsPerLevel);
             var levelTasks = dependencyLevel
@@ -56,6 +67,11 @@ public sealed class SqlTableSeeder : ITableSeeder
                 .ToArray();
 
             await Task.WhenAll(levelTasks);
+
+            _logger.LogInformation(
+                "Completed seed dependency level {LevelKey} ({TableCount} table(s)).",
+                dependencyLevel.Key,
+                dependencyLevel.Count());
         }
 
         _logger.LogInformation(

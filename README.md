@@ -253,6 +253,12 @@ Ordering notes:
 - **Schema exclusion** can be configured with `Clone:Seed:ExcludeSchemas` to skip seeding all tables from listed schemas.
 - **Post-clone scripts** still run in lexical file name order.
 
+Parallelism notes:
+
+- Seeding runs in **dependency levels** keyed by `Order` (or `GroupKey` when `Order` is not set). Only tables in the same level run concurrently.
+- If you observe only one running seed task, it usually means each table resolved to a different dependency level (or unresolved cyclic tables were intentionally split into single-table levels).
+- A failed table does not permanently reduce concurrency by itself; retries stay within that table's slot and other tables in the same level continue running up to the configured max.
+
 ### Selective Top N seeding per table
 
 You can now selectively copy only the latest **Top N** rows for specific tables while leaving other tables fully copied.
