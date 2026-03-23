@@ -301,6 +301,42 @@ Example:
 
 In this example, `AuditEvents` is limited to the latest 5,000 rows, while `ReferenceData` is copied in full.
 
+### Alternative seeding strategy: linked-server `SELECT INTO` / `INSERT SELECT`
+
+If you want seeding to happen entirely from the target SQL Server instance, you can configure your source as a SQL Server linked server and copy rows with four-part names.
+
+This repo includes an example script at `scripts/postclone/002-linked-server-seed-strategy.sql` that:
+
+1. Creates `master.dbo.usp_SeedTableFromLinkedServer`.
+2. Reads source/target metadata and computes the **shared writable columns**.
+3. Uses `SELECT ... INTO` when the target table does not yet exist.
+4. Uses `INSERT INTO ... SELECT` when the target table already exists.
+5. Skips target computed columns and optionally includes identity columns (`@IncludeIdentity = 1`).
+
+This column-intersection approach lets you seed safely when source and target schemas are not identical (for example target has extra columns, computed columns, or source has extra legacy columns).
+
+At a high level, the strategy looks like:
+
+```sql
+-- source metadata
+SELECT COLUMN_NAME
+FROM [SOURCE_LINKED].[AppDb].INFORMATION_SCHEMA.COLUMNS
+WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = 'ReferenceData';
+
+-- target metadata
+SELECT c.name, c.is_identity, c.is_computed
+FROM [AppDb].sys.columns c
+JOIN [AppDb].sys.tables t ON c.object_id = t.object_id
+JOIN [AppDb].sys.schemas s ON t.schema_id = s.schema_id
+WHERE s.name = 'dbo' AND t.name = 'ReferenceData';
+
+-- then dynamically execute one of:
+-- SELECT shared_columns INTO [AppDb].[dbo].[ReferenceData] FROM [SOURCE_LINKED].[AppDb].[dbo].[ReferenceData];
+-- INSERT INTO [AppDb].[dbo].[ReferenceData](shared_columns) SELECT shared_columns FROM [SOURCE_LINKED].[AppDb].[dbo].[ReferenceData];
+```
+
+Run the provided script manually, or add it to your post-clone script folder if you want it executed as part of `clone`.
+
 ## Commands
 
 ```bash
