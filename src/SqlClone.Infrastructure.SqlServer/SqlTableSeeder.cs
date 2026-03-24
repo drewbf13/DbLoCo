@@ -264,7 +264,7 @@ public sealed class SqlTableSeeder : ITableSeeder
     {
         if (UsesLinkedServerSeedStrategy())
         {
-            await SeedTableViaLinkedServerAsync(table, cancellationToken);
+            await SeedTableViaLinkedServerAsync(table, planLookup, maxInheritedParentFilters, cancellationToken);
             return;
         }
 
@@ -440,6 +440,8 @@ public sealed class SqlTableSeeder : ITableSeeder
 
     private async Task SeedTableViaLinkedServerAsync(
         SeedTablePlan table,
+        IReadOnlyDictionary<TableRefKey, SeedTablePlan> planLookup,
+        int maxInheritedParentFilters,
         CancellationToken cancellationToken)
     {
         using var attemptTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -464,12 +466,14 @@ public sealed class SqlTableSeeder : ITableSeeder
             table.Table,
             linkedServerName);
 
+        await using var source = _connectionFactory.CreateSourceConnection(table.SourceDatabase);
         await using var target = _connectionFactory.CreateTargetConnection(table.TargetDatabase);
+        await SqlClientTransientRetry.OpenWithRetryAsync(source, MaxSeedAttempts, effectiveCancellationToken);
         await SqlClientTransientRetry.OpenWithRetryAsync(target, MaxSeedAttempts, effectiveCancellationToken);
 
         var computedColumns = await LoadComputedColumnListAsync(target, table, effectiveCancellationToken);
         var targetColumns = await LoadColumnListAsync(target, table, effectiveCancellationToken);
-        var sourceColumns = await LoadColumnListFromLinkedServerAsync(target, table, linkedServerName, effectiveCancellationToken);
+        var sourceColumns = await LoadColumnListAsync(source, table, effectiveCancellationToken);
 
         var columnList = targetColumns
             .Where(column => sourceColumns.Contains(column, StringComparer.OrdinalIgnoreCase))
@@ -485,18 +489,28 @@ public sealed class SqlTableSeeder : ITableSeeder
         var escapedSchema = EscapeIdentifier(table.Schema);
         var escapedTable = EscapeIdentifier(table.Table);
         var destinationName = $"[{escapedSchema}].[{escapedTable}]";
-        var sourceName = $"[{EscapeIdentifier(linkedServerName)}].[{EscapeIdentifier(table.SourceDatabase)}].[{escapedSchema}].[{escapedTable}]";
         var escapedColumns = string.Join(", ", columnList.Select(c => $"[{EscapeIdentifier(c)}]"));
-        var orderByClause = BuildLinkedServerOrderByClause(columnList, table);
-        var sourceSelectionSql = table.LatestRows is > 0
-            ? $"SELECT TOP ({table.LatestRows.Value}) {escapedColumns} FROM {sourceName} ORDER BY {orderByClause}"
-            : $"SELECT {escapedColumns} FROM {sourceName}";
+
+        // Build an FK-aware selection query that uses 4-part linked-server names so that it
+        // can be executed on the target connection with the same dependency-based filtering
+        // that the BulkCopy path applies.
+        var linkedServerPrefix = $"[{EscapeIdentifier(linkedServerName)}].[{EscapeIdentifier(table.SourceDatabase)}]";
+        var selectionCache = new Dictionary<TableRefKey, TableSelectionQuery>();
+        var sourceSelection = await BuildTableSelectionQueryAsync(
+            source,
+            table,
+            planLookup,
+            selectionCache,
+            new HashSet<TableRefKey>(),
+            maxInheritedParentFilters,
+            effectiveCancellationToken,
+            linkedServerPrefix);
 
         var stageTableName = $"#Seed_{Guid.NewGuid():N}";
         var stageAndCountSql = $@"
 SELECT {escapedColumns}
 INTO {stageTableName}
-FROM ({sourceSelectionSql}) AS [src];
+FROM ({sourceSelection.Sql}) AS [src];
 SELECT COUNT_BIG(*) FROM {stageTableName};";
         var copiedRows = await ExecuteScalarInt64Async(target, stageAndCountSql, SeedSourceQueryTimeoutSeconds, effectiveCancellationToken);
 
@@ -567,49 +581,6 @@ ORDER BY ORDINAL_POSITION;";
         }
 
         return columns;
-    }
-
-    private static async Task<List<string>> LoadColumnListFromLinkedServerAsync(
-        SqlConnection target,
-        SeedTablePlan table,
-        string linkedServerName,
-        CancellationToken cancellationToken)
-    {
-        var sql = $@"
-SELECT COLUMN_NAME
-FROM [{EscapeIdentifier(linkedServerName)}].[{EscapeIdentifier(table.SourceDatabase)}].INFORMATION_SCHEMA.COLUMNS
-WHERE TABLE_SCHEMA = @schema
-  AND TABLE_NAME = @table
-ORDER BY ORDINAL_POSITION;";
-
-        await using var command = target.CreateCommand();
-        command.CommandText = sql;
-        command.CommandTimeout = MetadataQueryTimeoutSeconds;
-        command.Parameters.AddWithValue("@schema", table.Schema);
-        command.Parameters.AddWithValue("@table", table.Table);
-
-        var columns = new List<string>();
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            columns.Add(reader.GetString(0));
-        }
-
-        return columns;
-    }
-
-    private static string BuildLinkedServerOrderByClause(
-        IReadOnlyCollection<string> selectedColumns,
-        SeedTablePlan table)
-    {
-        if (!string.IsNullOrWhiteSpace(table.LatestOrderBy))
-        {
-            return table.LatestOrderBy!;
-        }
-
-        return selectedColumns
-            .Select(column => $"[{EscapeIdentifier(column)}] DESC")
-            .FirstOrDefault() ?? "(SELECT NULL)";
     }
 
     private static async Task<long> ExecuteScalarInt64Async(
@@ -763,7 +734,8 @@ WHERE TABLE_SCHEMA = @schema
         IDictionary<TableRefKey, TableSelectionQuery> selectionCache,
         ISet<TableRefKey> recursionStack,
         int maxInheritedParentFilters,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? tableNamePrefix = null)
     {
         var tableKey = TableRefKey.Create(table.SourceDatabase, table.Schema, table.Table);
         if (selectionCache.TryGetValue(tableKey, out var cachedSelection))
@@ -779,7 +751,10 @@ WHERE TABLE_SCHEMA = @schema
 
         try
         {
-            var sourceTableName = $"[{EscapeIdentifier(table.Schema)}].[{EscapeIdentifier(table.Table)}]";
+            var twoPartName = $"[{EscapeIdentifier(table.Schema)}].[{EscapeIdentifier(table.Table)}]";
+            var sourceTableName = tableNamePrefix is not null
+                ? $"{tableNamePrefix}.{twoPartName}"
+                : twoPartName;
             var fkRelationships = await LoadForeignKeyRelationshipsAsync(source, table, cancellationToken);
             var nullableChildColumns = await LoadNullableColumnLookupAsync(source, table, cancellationToken);
             var inheritedClauses = new List<InheritedParentFilter>();
@@ -799,7 +774,8 @@ WHERE TABLE_SCHEMA = @schema
                     selectionCache,
                     recursionStack,
                     maxInheritedParentFilters,
-                    cancellationToken);
+                    cancellationToken,
+                    tableNamePrefix);
 
                 if (!parentSelection.IsConstrained)
                 {
