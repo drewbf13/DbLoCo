@@ -253,6 +253,7 @@ Ordering notes:
 - **Seed row limiting** can be configured with `Clone:Seed:Tables[*]:LatestRows` plus optional `LatestOrderBy` (defaults to primary key descending). Child tables that reference limited parent tables are automatically filtered to rows whose foreign keys exist in the parent's selected set, and this is applied recursively through deeper parent/child chains.
 - **Nested seed config** is supported via `Clone:Seed:Tables[*]:Children`. Child entries inherit source/target/schema/order/group defaults from their parent unless overridden.
 - **Schema exclusion** can be configured with `Clone:Seed:ExcludeSchemas` to skip seeding all tables from listed schemas.
+- **Index handling during seed import**: SqlClone temporarily disables nonclustered indexes on seeded target tables before importing rows, then rebuilds them after seeding completes. Primary-key/unique-constraint-backed indexes and foreign key constraints remain enabled.
 - **Post-clone scripts** still run in lexical file name order.
 
 Parallelism notes:
