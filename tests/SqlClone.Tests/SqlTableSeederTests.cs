@@ -62,13 +62,13 @@ public sealed class SqlTableSeederTests
             LatestOrderBy = "CreatedAt DESC"
         };
 
-        var clause = SqlTableSeeder.BuildLinkedServerOrderByClause(["Id", "CreatedAt"], table);
+        var clause = SqlTableSeeder.BuildLinkedServerOrderByClause(["Id", "CreatedAt"], [], table);
 
         clause.Should().Be("CreatedAt DESC");
     }
 
     [Fact]
-    public void BuildLinkedServerOrderByClause_WhenNoLatestOrderBy_ReturnsFirstColumnDesc()
+    public void BuildLinkedServerOrderByClause_WhenPrimaryKeyColumnsProvided_UsesPKColumnsDesc()
     {
         var table = new SeedTablePlan
         {
@@ -78,7 +78,39 @@ public sealed class SqlTableSeederTests
             Table = "Orders"
         };
 
-        var clause = SqlTableSeeder.BuildLinkedServerOrderByClause(["Id", "Name"], table);
+        var clause = SqlTableSeeder.BuildLinkedServerOrderByClause(["Id", "Name"], ["Id"], table);
+
+        clause.Should().Be("[Id] DESC");
+    }
+
+    [Fact]
+    public void BuildLinkedServerOrderByClause_WhenCompositePrimaryKey_UsesPKColumnsDesc()
+    {
+        var table = new SeedTablePlan
+        {
+            SourceDatabase = "src",
+            TargetDatabase = "tgt",
+            Schema = "dbo",
+            Table = "Orders"
+        };
+
+        var clause = SqlTableSeeder.BuildLinkedServerOrderByClause(["OrderId", "LineId", "Name"], ["OrderId", "LineId"], table);
+
+        clause.Should().Be("[OrderId] DESC, [LineId] DESC");
+    }
+
+    [Fact]
+    public void BuildLinkedServerOrderByClause_WhenNoPKAndNoLatestOrderBy_ReturnsFirstColumnDesc()
+    {
+        var table = new SeedTablePlan
+        {
+            SourceDatabase = "src",
+            TargetDatabase = "tgt",
+            Schema = "dbo",
+            Table = "Orders"
+        };
+
+        var clause = SqlTableSeeder.BuildLinkedServerOrderByClause(["Id", "Name"], [], table);
 
         clause.Should().Be("[Id] DESC");
     }
@@ -94,7 +126,7 @@ public sealed class SqlTableSeederTests
             Table = "Orders"
         };
 
-        var clause = SqlTableSeeder.BuildLinkedServerOrderByClause([], table);
+        var clause = SqlTableSeeder.BuildLinkedServerOrderByClause([], [], table);
 
         clause.Should().Be("(SELECT NULL)");
     }
@@ -110,7 +142,7 @@ public sealed class SqlTableSeederTests
             Table = "Orders"
         };
 
-        var clause = SqlTableSeeder.BuildLinkedServerOrderByClause(["Col]Name"], table);
+        var clause = SqlTableSeeder.BuildLinkedServerOrderByClause(["Col]Name"], [], table);
 
         clause.Should().Be("[Col]]Name] DESC");
     }

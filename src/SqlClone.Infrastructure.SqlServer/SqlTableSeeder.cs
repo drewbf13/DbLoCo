@@ -490,7 +490,8 @@ public sealed class SqlTableSeeder : ITableSeeder
         var destinationName = $"[{escapedSchema}].[{escapedTable}]";
         var sourceName = $"[{EscapeIdentifier(linkedServerName)}].[{EscapeIdentifier(table.SourceDatabase)}].[{escapedSchema}].[{escapedTable}]";
         var escapedColumns = string.Join(", ", columnList.Select(c => $"[{EscapeIdentifier(c)}]"));
-        var orderByClause = BuildLinkedServerOrderByClause(columnList, table);
+        var primaryKeyColumns = await LoadPrimaryKeyColumnListAsync(target, table, effectiveCancellationToken);
+        var orderByClause = BuildLinkedServerOrderByClause(columnList, primaryKeyColumns, table);
         var sourceSelectionSql = table.LatestRows is > 0
             ? $"SELECT TOP ({table.LatestRows.Value}) {escapedColumns} FROM {sourceName} ORDER BY {orderByClause}"
             : $"SELECT {escapedColumns} FROM {sourceName}";
@@ -603,11 +604,17 @@ ORDER BY ORDINAL_POSITION;";
 
     internal static string BuildLinkedServerOrderByClause(
         IReadOnlyCollection<string> selectedColumns,
+        IReadOnlyCollection<string> primaryKeyColumns,
         SeedTablePlan table)
     {
         if (!string.IsNullOrWhiteSpace(table.LatestOrderBy))
         {
             return table.LatestOrderBy!;
+        }
+
+        if (primaryKeyColumns.Count > 0)
+        {
+            return string.Join(", ", primaryKeyColumns.Select(column => $"[{EscapeIdentifier(column)}] DESC"));
         }
 
         return selectedColumns
