@@ -251,6 +251,7 @@ Ordering notes:
 - **Seed ordering** is controlled by `Clone:Seed:Tables[*]:Order` (ascending). Tables in the same order value are seeded in parallel.
 - **Seed grouping metadata** is provided by `Clone:Seed:Tables[*]:GroupKey` (for example domain/schema lanes in generated config) and is used as a deterministic tie-breaker.
 - **Seed row limiting** can be configured with `Clone:Seed:Tables[*]:LatestRows` plus optional `LatestOrderBy` (defaults to primary key descending). Child tables that reference limited parent tables are automatically filtered to rows whose foreign keys exist in the parent's selected set, and this is applied recursively through deeper parent/child chains.
+- **Inherited parent-filter priority override** can be configured with `Clone:Seed:InheritedParentFilterPriorityTables` (`schema.table` or `table`). When SqlClone must cap recursive parent filters to avoid FK-filter explosion, listed tables are prioritized so they remain in the selected parent set.
 - **Nested seed config** is supported via `Clone:Seed:Tables[*]:Children`. Child entries inherit source/target/schema/order/group defaults from their parent unless overridden.
 - **Schema exclusion** can be configured with `Clone:Seed:ExcludeSchemas` to skip seeding all tables from listed schemas.
 - **Index handling during seed import**: SqlClone temporarily disables nonclustered indexes on seeded target tables before importing rows, then rebuilds them after seeding completes. Primary-key/unique-constraint-backed indexes and foreign key constraints remain enabled.
@@ -273,11 +274,12 @@ You can now selectively copy only the latest **Top N** rows for specific tables 
 Example:
 
 ```json
-"Seed": {
-  "Enabled": true,
-  "SourceDatabase": "AppDb",
-  "ExcludeSchemas": [ "audit" ],
-  "Tables": [
+  "Seed": {
+    "Enabled": true,
+    "SourceDatabase": "AppDb",
+    "ExcludeSchemas": [ "audit" ],
+    "InheritedParentFilterPriorityTables": [ "dbo.Customer", "Order" ],
+    "Tables": [
     {
       "SourceDatabase": "AppDb",
       "TargetDatabase": "AppDb",

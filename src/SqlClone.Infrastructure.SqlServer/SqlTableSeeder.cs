@@ -25,6 +25,7 @@ public sealed class SqlTableSeeder : ITableSeeder
     private readonly SqlExecutionHelper _sql;
     private readonly ILogger<SqlTableSeeder> _logger;
     private readonly SeedOptions _seedOptions;
+    private readonly HashSet<string> _inheritedParentFilterPriorityTables;
 
     public SqlTableSeeder(
         SqlConnectionFactory connectionFactory,
@@ -36,6 +37,7 @@ public sealed class SqlTableSeeder : ITableSeeder
         _sql = sql;
         _logger = logger;
         _seedOptions = options.Value.Seed;
+        _inheritedParentFilterPriorityTables = BuildInheritedParentFilterPriorityLookup(_seedOptions.InheritedParentFilterPriorityTables);
     }
 
     public async Task SeedAsync(IReadOnlyList<SeedTablePlan> tables, CancellationToken cancellationToken)
@@ -829,7 +831,8 @@ WHERE TABLE_SCHEMA = @schema
                     ComputeInheritedFilterPriorityScore(
                         table,
                         relationship,
-                        nullableChildColumns)));
+                        nullableChildColumns,
+                        _inheritedParentFilterPriorityTables)));
             }
 
             var selectedInheritedClauses = SelectInheritedParentFilters(inheritedClauses, maxInheritedParentFilters);
@@ -1297,7 +1300,8 @@ ORDER BY s.name, t.name, i.name;";
     private static int ComputeInheritedFilterPriorityScore(
         SeedTablePlan childTable,
         ForeignKeyRelationship relationship,
-        IReadOnlySet<string> nullableChildColumns)
+        IReadOnlySet<string> nullableChildColumns,
+        IReadOnlySet<string> inheritedParentFilterPriorityTables)
     {
         var score = 0;
         var childTableName = childTable.Table.ToLowerInvariant();
@@ -1321,6 +1325,48 @@ ORDER BY s.name, t.name, i.name;";
             score += 5;
         }
 
+        if (IsExplicitlyPrioritizedParent(
+                relationship.ReferencedSchema,
+                relationship.ReferencedTable,
+                inheritedParentFilterPriorityTables))
+        {
+            score += 1_000;
+        }
+
         return score;
+    }
+
+    internal static bool IsExplicitlyPrioritizedParent(
+        string schema,
+        string table,
+        IReadOnlySet<string> inheritedParentFilterPriorityTables)
+    {
+        if (inheritedParentFilterPriorityTables.Count == 0)
+        {
+            return false;
+        }
+
+        var twoPartName = $"{schema}.{table}";
+        return inheritedParentFilterPriorityTables.Contains(twoPartName)
+            || inheritedParentFilterPriorityTables.Contains(table);
+    }
+
+    internal static HashSet<string> BuildInheritedParentFilterPriorityLookup(IEnumerable<string>? configuredTableNames)
+    {
+        var normalized = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (configuredTableNames is null)
+        {
+            return normalized;
+        }
+
+        foreach (var tableName in configuredTableNames)
+        {
+            if (!string.IsNullOrWhiteSpace(tableName))
+            {
+                normalized.Add(tableName.Trim());
+            }
+        }
+
+        return normalized;
     }
 }
