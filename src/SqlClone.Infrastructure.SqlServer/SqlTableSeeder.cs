@@ -52,6 +52,7 @@ public sealed class SqlTableSeeder : ITableSeeder
         var completedTables = 0;
         var failedTables = 0;
         var runningTables = 0;
+        var runningTableNames = new ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase);
         var failedTablesWithErrors = new ConcurrentBag<FailedTableSeed>();
 
         _logger.LogInformation("Starting seed for {TotalTables} table(s).", totalTables);
@@ -121,12 +122,24 @@ public sealed class SqlTableSeeder : ITableSeeder
 
         void LogOverallProgress()
         {
+            var currentlyRunning = Volatile.Read(ref runningTables);
             _logger.LogInformation(
                 "Seed overall progress: {Completed}/{Total} complete, {Failed} failed, {Running} running.",
                 completedTables,
                 totalTables,
                 failedTables,
-                runningTables);
+                currentlyRunning);
+
+            if (currentlyRunning is > 0 and < 3)
+            {
+                var runningTableList = string.Join(
+                    ", ",
+                    runningTableNames.Keys.OrderBy(name => name, StringComparer.OrdinalIgnoreCase));
+
+                _logger.LogInformation(
+                    "Currently running table(s): {RunningTableList}",
+                    string.IsNullOrWhiteSpace(runningTableList) ? "(none)" : runningTableList);
+            }
         }
 
         async Task SeedTableWithWarningThrottledAsync(
@@ -137,6 +150,8 @@ public sealed class SqlTableSeeder : ITableSeeder
         {
             await concurrencyGate.WaitAsync(ct);
             Interlocked.Increment(ref runningTables);
+            var runningTableName = $"{table.TargetDatabase}.{table.Schema}.{table.Table}";
+            runningTableNames.TryAdd(runningTableName, 0);
             LogOverallProgress();
 
             try
@@ -152,6 +167,7 @@ public sealed class SqlTableSeeder : ITableSeeder
             }
             finally
             {
+                runningTableNames.TryRemove(runningTableName, out _);
                 Interlocked.Decrement(ref runningTables);
                 Interlocked.Increment(ref completedTables);
                 LogOverallProgress();
