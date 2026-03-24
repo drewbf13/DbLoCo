@@ -11,6 +11,7 @@ namespace SqlClone.Infrastructure.SqlServer;
 public sealed class SqlTableSeeder : ITableSeeder
 {
     public readonly record struct SeedExecutionLevel(int OrderKey, int GroupKey, IReadOnlyList<SeedTablePlan> Tables);
+    private readonly record struct FailedTableSeed(string TableName, string Error);
 
     private const int MaxConcurrentSeedOperationsPerLevel = 8;
     private const int MetadataQueryTimeoutSeconds = 180;
@@ -51,7 +52,7 @@ public sealed class SqlTableSeeder : ITableSeeder
         var completedTables = 0;
         var failedTables = 0;
         var runningTables = 0;
-        var failedTableNames = new ConcurrentBag<string>();
+        var failedTablesWithErrors = new ConcurrentBag<FailedTableSeed>();
 
         _logger.LogInformation("Starting seed for {TotalTables} table(s).", totalTables);
 
@@ -97,12 +98,25 @@ public sealed class SqlTableSeeder : ITableSeeder
             totalTables,
             failedTables);
 
-        if (!failedTableNames.IsEmpty)
+        if (!failedTablesWithErrors.IsEmpty)
         {
             _logger.LogWarning(
                 "Failed tables ({FailedCount}): {FailedTables}",
-                failedTableNames.Count,
-                string.Join(", ", failedTableNames.OrderBy(table => table, StringComparer.OrdinalIgnoreCase)));
+                failedTablesWithErrors.Count,
+                string.Join(", ", failedTablesWithErrors
+                    .Select(failedTable => failedTable.TableName)
+                    .OrderBy(table => table, StringComparer.OrdinalIgnoreCase)));
+
+            var errorReport = string.Join(
+                Environment.NewLine,
+                failedTablesWithErrors
+                    .OrderBy(failedTable => failedTable.TableName, StringComparer.OrdinalIgnoreCase)
+                    .Select(failedTable => $" - {failedTable.TableName}: {failedTable.Error}"));
+
+            _logger.LogWarning(
+                "Seed failure report by table:{NewLine}{ErrorReport}",
+                Environment.NewLine,
+                errorReport);
         }
 
         void LogOverallProgress()
@@ -128,10 +142,12 @@ public sealed class SqlTableSeeder : ITableSeeder
             try
             {
                 var succeeded = await SeedTableWithWarningAsync(table, planLookup, ct);
-                if (!succeeded)
+                if (!succeeded.Success)
                 {
                     Interlocked.Increment(ref failedTables);
-                    failedTableNames.Add($"{table.TargetDatabase}.{table.Schema}.{table.Table}");
+                    failedTablesWithErrors.Add(new FailedTableSeed(
+                        $"{table.TargetDatabase}.{table.Schema}.{table.Table}",
+                        succeeded.Error ?? "Unknown error"));
                 }
             }
             finally
@@ -159,13 +175,14 @@ public sealed class SqlTableSeeder : ITableSeeder
     }
 
 
-    private async Task<bool> SeedTableWithWarningAsync(
+    private async Task<SeedTableResult> SeedTableWithWarningAsync(
         SeedTablePlan table,
         IReadOnlyDictionary<TableRefKey, SeedTablePlan> planLookup,
         CancellationToken cancellationToken)
     {
         const bool allowRetry = true;
         var maxInheritedParentFiltersForAttempt = MaxInheritedParentFilters;
+        Exception? lastException = null;
 
         for (var attempt = 1; attempt <= MaxSeedAttempts; attempt++)
         {
@@ -174,7 +191,7 @@ public sealed class SqlTableSeeder : ITableSeeder
             try
             {
                 await SeedTableAsync(table, planLookup, maxInheritedParentFiltersForAttempt, cancellationToken);
-                return true;
+                return SeedTableResult.Succeeded();
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && attempt < MaxSeedAttempts)
             {
@@ -200,6 +217,7 @@ public sealed class SqlTableSeeder : ITableSeeder
             }
             catch (Exception ex) when (allowRetry && attempt < MaxSeedAttempts && ShouldRetrySeedAttempt(ex))
             {
+                lastException = ex;
                 SqlConnection.ClearAllPools();
                 var delay = TimeSpan.FromSeconds(Math.Pow(2, attempt - 1));
                 _logger.LogWarning(
@@ -219,6 +237,7 @@ public sealed class SqlTableSeeder : ITableSeeder
             }
             catch (Exception ex) when (allowRetry && attempt < MaxSeedAttempts && IsForeignKeyConstraintViolation(ex))
             {
+                lastException = ex;
                 maxInheritedParentFiltersForAttempt = Math.Min(
                     int.MaxValue,
                     maxInheritedParentFiltersForAttempt + MaxInheritedParentFilters);
@@ -237,6 +256,7 @@ public sealed class SqlTableSeeder : ITableSeeder
             }
             catch (Exception ex)
             {
+                lastException = ex;
                 _logger.LogWarning(
                     ex,
                     "Skipping table {SourceDatabase}.{Schema}.{Table} -> {TargetDatabase}.{Schema}.{Table} after seed failure.",
@@ -246,7 +266,7 @@ public sealed class SqlTableSeeder : ITableSeeder
                     table.TargetDatabase,
                     table.Schema,
                     table.Table);
-                return false;
+                return SeedTableResult.Failed(ex);
             }
         }
 
@@ -262,7 +282,35 @@ public sealed class SqlTableSeeder : ITableSeeder
                 table.Table);
         }
 
-        return false;
+        return SeedTableResult.Failed(lastException);
+    }
+
+    private readonly record struct SeedTableResult(bool Success, string? Error)
+    {
+        public static SeedTableResult Succeeded() => new(true, null);
+
+        public static SeedTableResult Failed(Exception? exception) => new(false, FormatExceptionMessage(exception));
+    }
+
+    private static string FormatExceptionMessage(Exception? exception)
+    {
+        if (exception is null)
+        {
+            return "No exception details were captured.";
+        }
+
+        var messages = new List<string>();
+        for (var current = exception; current is not null; current = current.InnerException)
+        {
+            if (!string.IsNullOrWhiteSpace(current.Message))
+            {
+                messages.Add(current.Message.Trim());
+            }
+        }
+
+        return messages.Count == 0
+            ? exception.GetType().Name
+            : string.Join(" --> ", messages.Distinct(StringComparer.Ordinal));
     }
 
     private static bool ShouldRetrySeedAttempt(Exception exception) =>
