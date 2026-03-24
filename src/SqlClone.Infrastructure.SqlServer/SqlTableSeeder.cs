@@ -401,103 +401,115 @@ public sealed class SqlTableSeeder : ITableSeeder
 
         var escapedColumns = string.Join(", ", columnList.Select(c => $"[{EscapeIdentifier(c)}]"));
         var selectionCache = new Dictionary<TableRefKey, TableSelectionQuery>();
+        var materializedParentKeyTables = new List<string>();
+        long estimatedRowSizeBytes = 0;
+        var bulkCopyBatchSize = BulkCopyMinBatchRows;
         var sourceSelection = await BuildTableSelectionQueryAsync(
+            source,
             source,
             table,
             planLookup,
             selectionCache,
+            materializedParentKeyTables,
             new HashSet<TableRefKey>(),
             maxInheritedParentFilters,
             effectiveCancellationToken);
-        var sourceQuery = $"SELECT {escapedColumns} FROM ({sourceSelection.Sql}) AS [src];";
-        var estimatedRowSizeBytes = await EstimateRowSizeBytesAsync(source, table, columnList, effectiveCancellationToken);
-        var bulkCopyBatchSize = ComputeBulkCopyBatchSize(estimatedRowSizeBytes);
-        var expectedSourceRowCount = await LoadSourceRowCountAsync(source, sourceSelection.Sql, effectiveCancellationToken);
-        await using var sourceCommand = source.CreateCommand();
-        sourceCommand.CommandText = sourceQuery;
-        sourceCommand.CommandTimeout = SeedSourceQueryTimeoutSeconds;
-
-        await using var reader = await sourceCommand.ExecuteReaderAsync(effectiveCancellationToken);
-        var primaryKeyColumns = await LoadPrimaryKeyColumnListAsync(target, table, effectiveCancellationToken);
-        var identityColumns = await LoadIdentityColumnListAsync(target, table, effectiveCancellationToken);
-        var nonNullableColumns = await LoadNonNullableColumnListAsync(target, table, effectiveCancellationToken);
-        var includesIdentityColumns = columnList.Any(c => identityColumns.Contains(c, StringComparer.OrdinalIgnoreCase));
-        var missingPrimaryKeyColumns = primaryKeyColumns
-            .Where(pk => !columnList.Contains(pk, StringComparer.OrdinalIgnoreCase))
-            .ToList();
-        var useMergeStrategy = table.TruncateTarget
-            && primaryKeyColumns.Count > 0
-            && missingPrimaryKeyColumns.Count == 0;
-
-        if (useMergeStrategy)
+        try
         {
-            var tempTableName = $"#Seed_{Guid.NewGuid():N}";
-            await _sql.ExecuteNonQueryAsync(
-                target,
-                $"SELECT TOP (0) {escapedColumns} INTO {tempTableName} FROM {destinationName};",
-                effectiveCancellationToken);
+            var sourceQuery = $"SELECT {escapedColumns} FROM ({sourceSelection.Sql}) AS [src];";
+            estimatedRowSizeBytes = await EstimateRowSizeBytesAsync(source, table, columnList, effectiveCancellationToken);
+            bulkCopyBatchSize = ComputeBulkCopyBatchSize(estimatedRowSizeBytes);
+            var expectedSourceRowCount = await LoadSourceRowCountAsync(source, sourceSelection.Sql, effectiveCancellationToken);
+            await using var sourceCommand = source.CreateCommand();
+            sourceCommand.CommandText = sourceQuery;
+            sourceCommand.CommandTimeout = SeedSourceQueryTimeoutSeconds;
 
-            using (var bulkCopy = CreateBulkCopy(target, tempTableName, columnList, includesIdentityColumns, bulkCopyBatchSize, rowsCopied =>
-                   {
-                       copiedRows = rowsCopied;
-                       _logger.LogInformation(
-                           "Seeding progress {SourceDatabase}.{Schema}.{Table}: {RowsCopied} row(s) copied.",
-                           table.SourceDatabase,
-                           table.Schema,
-                           table.Table,
-                           rowsCopied);
-                   }))
-            {
-                await bulkCopy.WriteToServerAsync(reader, effectiveCancellationToken);
-            }
-            copiedRows = Math.Max(copiedRows, expectedSourceRowCount);
+            await using var reader = await sourceCommand.ExecuteReaderAsync(effectiveCancellationToken);
+            var primaryKeyColumns = await LoadPrimaryKeyColumnListAsync(target, table, effectiveCancellationToken);
+            var identityColumns = await LoadIdentityColumnListAsync(target, table, effectiveCancellationToken);
+            var nonNullableColumns = await LoadNonNullableColumnListAsync(target, table, effectiveCancellationToken);
+            var includesIdentityColumns = columnList.Any(c => identityColumns.Contains(c, StringComparer.OrdinalIgnoreCase));
+            var missingPrimaryKeyColumns = primaryKeyColumns
+                .Where(pk => !columnList.Contains(pk, StringComparer.OrdinalIgnoreCase))
+                .ToList();
+            var useMergeStrategy = table.TruncateTarget
+                && primaryKeyColumns.Count > 0
+                && missingPrimaryKeyColumns.Count == 0;
 
-            var mergeSql = BuildMergeSql(destinationName, tempTableName, columnList, primaryKeyColumns, nonNullableColumns);
-            if (includesIdentityColumns)
+            if (useMergeStrategy)
             {
-                mergeSql = WrapWithIdentityInsert(destinationName, mergeSql);
-            }
+                var tempTableName = $"#Seed_{Guid.NewGuid():N}";
+                await _sql.ExecuteNonQueryAsync(
+                    target,
+                    $"SELECT TOP (0) {escapedColumns} INTO {tempTableName} FROM {destinationName};",
+                    effectiveCancellationToken);
 
-            await _sql.ExecuteNonQueryAsync(target, mergeSql, effectiveCancellationToken);
-            await _sql.ExecuteNonQueryAsync(target, $"DROP TABLE {tempTableName};", effectiveCancellationToken);
-        }
-        else
-        {
-            if (table.TruncateTarget)
-            {
-                if (primaryKeyColumns.Count == 0)
+                using (var bulkCopy = CreateBulkCopy(target, tempTableName, columnList, includesIdentityColumns, bulkCopyBatchSize, rowsCopied =>
+                       {
+                           copiedRows = rowsCopied;
+                           _logger.LogInformation(
+                               "Seeding progress {SourceDatabase}.{Schema}.{Table}: {RowsCopied} row(s) copied.",
+                               table.SourceDatabase,
+                               table.Schema,
+                               table.Table,
+                               rowsCopied);
+                       }))
                 {
-                    _logger.LogWarning(
-                        "Table {TargetDatabase}.{Schema}.{Table} requested truncate-style seed but has no primary key. Falling back to TRUNCATE + INSERT.",
-                        table.TargetDatabase,
-                        table.Schema,
-                        table.Table);
+                    await bulkCopy.WriteToServerAsync(reader, effectiveCancellationToken);
                 }
-                else if (missingPrimaryKeyColumns.Count > 0)
+                copiedRows = Math.Max(copiedRows, expectedSourceRowCount);
+
+                var mergeSql = BuildMergeSql(destinationName, tempTableName, columnList, primaryKeyColumns, nonNullableColumns);
+                if (includesIdentityColumns)
                 {
-                    _logger.LogWarning(
-                        "Table {TargetDatabase}.{Schema}.{Table} requested truncate-style seed but filtered columns excluded primary key columns ({PrimaryKeyColumns}). Falling back to TRUNCATE + INSERT.",
-                        table.TargetDatabase,
+                    mergeSql = WrapWithIdentityInsert(destinationName, mergeSql);
+                }
+
+                await _sql.ExecuteNonQueryAsync(target, mergeSql, effectiveCancellationToken);
+                await _sql.ExecuteNonQueryAsync(target, $"DROP TABLE {tempTableName};", effectiveCancellationToken);
+            }
+            else
+            {
+                if (table.TruncateTarget)
+                {
+                    if (primaryKeyColumns.Count == 0)
+                    {
+                        _logger.LogWarning(
+                            "Table {TargetDatabase}.{Schema}.{Table} requested truncate-style seed but has no primary key. Falling back to TRUNCATE + INSERT.",
+                            table.TargetDatabase,
+                            table.Schema,
+                            table.Table);
+                    }
+                    else if (missingPrimaryKeyColumns.Count > 0)
+                    {
+                        _logger.LogWarning(
+                            "Table {TargetDatabase}.{Schema}.{Table} requested truncate-style seed but filtered columns excluded primary key columns ({PrimaryKeyColumns}). Falling back to TRUNCATE + INSERT.",
+                            table.TargetDatabase,
+                            table.Schema,
+                            table.Table,
+                            string.Join(", ", missingPrimaryKeyColumns.OrderBy(c => c, StringComparer.OrdinalIgnoreCase)));
+                    }
+
+                    await _sql.ExecuteNonQueryAsync(target, $"TRUNCATE TABLE {destinationName};", effectiveCancellationToken);
+                }
+
+                using var bulkCopy = CreateBulkCopy(target, destinationName, columnList, includesIdentityColumns, bulkCopyBatchSize, rowsCopied =>
+                {
+                    copiedRows = rowsCopied;
+                    _logger.LogInformation(
+                        "Seeding progress {SourceDatabase}.{Schema}.{Table}: {RowsCopied} row(s) copied.",
+                        table.SourceDatabase,
                         table.Schema,
                         table.Table,
-                        string.Join(", ", missingPrimaryKeyColumns.OrderBy(c => c, StringComparer.OrdinalIgnoreCase)));
-                }
-
-                await _sql.ExecuteNonQueryAsync(target, $"TRUNCATE TABLE {destinationName};", effectiveCancellationToken);
+                        rowsCopied);
+                });
+                await bulkCopy.WriteToServerAsync(reader, effectiveCancellationToken);
+                copiedRows = Math.Max(copiedRows, expectedSourceRowCount);
             }
-
-            using var bulkCopy = CreateBulkCopy(target, destinationName, columnList, includesIdentityColumns, bulkCopyBatchSize, rowsCopied =>
-            {
-                copiedRows = rowsCopied;
-                _logger.LogInformation(
-                    "Seeding progress {SourceDatabase}.{Schema}.{Table}: {RowsCopied} row(s) copied.",
-                    table.SourceDatabase,
-                    table.Schema,
-                    table.Table,
-                    rowsCopied);
-            });
-            await bulkCopy.WriteToServerAsync(reader, effectiveCancellationToken);
-            copiedRows = Math.Max(copiedRows, expectedSourceRowCount);
+        }
+        finally
+        {
+            await DropTempTablesAsync(source, materializedParentKeyTables, CancellationToken.None);
         }
 
         stopwatch.Stop();
@@ -589,57 +601,67 @@ public sealed class SqlTableSeeder : ITableSeeder
         // that the BulkCopy path applies.
         var linkedServerPrefix = $"[{EscapeIdentifier(linkedServerName)}].[{EscapeIdentifier(table.SourceDatabase)}]";
         var selectionCache = new Dictionary<TableRefKey, TableSelectionQuery>();
+        var materializedParentKeyTables = new List<string>();
         var sourceSelection = await BuildTableSelectionQueryAsync(
             source,
+            target,
             table,
             planLookup,
             selectionCache,
+            materializedParentKeyTables,
             new HashSet<TableRefKey>(),
             maxInheritedParentFilters,
             effectiveCancellationToken,
             linkedServerPrefix);
 
-        var stageTableName = $"#Seed_{Guid.NewGuid():N}";
-        var stageAndCountSql = $@"
+        try
+        {
+            var stageTableName = $"#Seed_{Guid.NewGuid():N}";
+            var stageAndCountSql = $@"
 SELECT {escapedColumns}
 INTO {stageTableName}
 FROM ({sourceSelection.Sql}) AS [src];
 SELECT COUNT_BIG(*) FROM {stageTableName};";
-        var copiedRows = await ExecuteScalarInt64Async(target, stageAndCountSql, SeedSourceQueryTimeoutSeconds, effectiveCancellationToken);
+            var copiedRows = await ExecuteScalarInt64Async(target, stageAndCountSql, SeedSourceQueryTimeoutSeconds, effectiveCancellationToken);
 
-        if (table.TruncateTarget)
-        {
-            await _sql.ExecuteNonQueryAsync(target, $"TRUNCATE TABLE {destinationName};", effectiveCancellationToken);
-        }
+            if (table.TruncateTarget)
+            {
+                await _sql.ExecuteNonQueryAsync(target, $"TRUNCATE TABLE {destinationName};", effectiveCancellationToken);
+            }
 
-        var identityColumns = await LoadIdentityColumnListAsync(target, table, effectiveCancellationToken);
-        var includesIdentityColumns = columnList.Any(c => identityColumns.Contains(c, StringComparer.OrdinalIgnoreCase));
-        var insertSql = $@"
+            var identityColumns = await LoadIdentityColumnListAsync(target, table, effectiveCancellationToken);
+            var includesIdentityColumns = columnList.Any(c => identityColumns.Contains(c, StringComparer.OrdinalIgnoreCase));
+            var insertSql = $@"
 INSERT INTO {destinationName} ({escapedColumns})
 SELECT {escapedColumns}
 FROM {stageTableName};";
 
-        if (includesIdentityColumns)
-        {
-            insertSql = WrapWithIdentityInsert(destinationName, insertSql);
+            if (includesIdentityColumns)
+            {
+                insertSql = WrapWithIdentityInsert(destinationName, insertSql);
+            }
+
+            await _sql.ExecuteNonQueryAsync(target, insertSql, effectiveCancellationToken);
+            await _sql.ExecuteNonQueryAsync(target, $"DROP TABLE {stageTableName};", effectiveCancellationToken);
+
+            stopwatch.Stop();
+            _logger.LogInformation(
+                "Linked-server seeded {SourceDatabase}.{Schema}.{Table} into {TargetDatabase}.{Schema}.{Table} in {ElapsedMs} ms ({RowsCopied} row(s) copied, strategy {Strategy}, linked server {LinkedServer}).",
+                table.SourceDatabase,
+                table.Schema,
+                table.Table,
+                table.TargetDatabase,
+                table.Schema,
+                table.Table,
+                stopwatch.ElapsedMilliseconds,
+                copiedRows,
+                SeedStrategy.LinkedServer,
+                linkedServerName);
         }
-
-        await _sql.ExecuteNonQueryAsync(target, insertSql, effectiveCancellationToken);
-        await _sql.ExecuteNonQueryAsync(target, $"DROP TABLE {stageTableName};", effectiveCancellationToken);
-
-        stopwatch.Stop();
-        _logger.LogInformation(
-            "Linked-server seeded {SourceDatabase}.{Schema}.{Table} into {TargetDatabase}.{Schema}.{Table} in {ElapsedMs} ms ({RowsCopied} row(s) copied, strategy {Strategy}, linked server {LinkedServer}).",
-            table.SourceDatabase,
-            table.Schema,
-            table.Table,
-            table.TargetDatabase,
-            table.Schema,
-            table.Table,
-            stopwatch.ElapsedMilliseconds,
-            copiedRows,
-            SeedStrategy.LinkedServer,
-            linkedServerName);
+        finally
+        {
+            await DropTempTablesAsync(target, materializedParentKeyTables, CancellationToken.None);
+        }
 
         if (computedColumns.Count > 0)
         {
@@ -824,9 +846,11 @@ WHERE TABLE_SCHEMA = @schema
 
     private async Task<TableSelectionQuery> BuildTableSelectionQueryAsync(
         SqlConnection source,
+        SqlConnection selectionExecutionConnection,
         SeedTablePlan table,
         IReadOnlyDictionary<TableRefKey, SeedTablePlan> planLookup,
         IDictionary<TableRefKey, TableSelectionQuery> selectionCache,
+        ICollection<string> materializedParentKeyTables,
         ISet<TableRefKey> recursionStack,
         int maxInheritedParentFilters,
         CancellationToken cancellationToken,
@@ -864,9 +888,11 @@ WHERE TABLE_SCHEMA = @schema
 
                 var parentSelection = await BuildTableSelectionQueryAsync(
                     source,
+                    selectionExecutionConnection,
                     parentPlan,
                     planLookup,
                     selectionCache,
+                    materializedParentKeyTables,
                     recursionStack,
                     maxInheritedParentFilters,
                     cancellationToken,
@@ -877,7 +903,12 @@ WHERE TABLE_SCHEMA = @schema
                     continue;
                 }
 
-                var parentColumns = string.Join(", ", relationship.ColumnPairs.Select(pair => $"[parent].[{EscapeIdentifier(pair.ParentColumn)}]"));
+                var parentKeyTempTable = await MaterializeParentKeySetAsync(
+                    selectionExecutionConnection,
+                    relationship.ColumnPairs,
+                    parentSelection.Sql,
+                    cancellationToken);
+                materializedParentKeyTables.Add(parentKeyTempTable);
                 var joinPredicate = string.Join(
                     " AND ",
                     relationship.ColumnPairs.Select(pair =>
@@ -891,10 +922,7 @@ WHERE TABLE_SCHEMA = @schema
                 var existsClause =
                     $@"EXISTS (
     SELECT 1
-    FROM (
-        SELECT DISTINCT {parentColumns}
-        FROM ({parentSelection.Sql}) AS [parent]
-    ) AS [keys]
+    FROM {parentKeyTempTable} AS [keys]
     WHERE {joinPredicate}
 )";
 
@@ -945,6 +973,51 @@ WHERE TABLE_SCHEMA = @schema
         finally
         {
             recursionStack.Remove(tableKey);
+        }
+    }
+
+    private static async Task<string> MaterializeParentKeySetAsync(
+        SqlConnection selectionExecutionConnection,
+        IReadOnlyList<ForeignKeyColumnPair> columnPairs,
+        string parentSelectionSql,
+        CancellationToken cancellationToken)
+    {
+        var tempTableName = $"#ParentKeys_{Guid.NewGuid():N}";
+        var keyProjection = string.Join(
+            ", ",
+            columnPairs.Select(pair =>
+                $"[parent].[{EscapeIdentifier(pair.ParentColumn)}] AS [{EscapeIdentifier(pair.ParentColumn)}]"));
+        var materializeSql = $@"
+SELECT DISTINCT {keyProjection}
+INTO {tempTableName}
+FROM ({parentSelectionSql}) AS [parent];";
+
+        await using var command = selectionExecutionConnection.CreateCommand();
+        command.CommandText = materializeSql;
+        command.CommandTimeout = SeedSourceQueryTimeoutSeconds;
+        await command.ExecuteNonQueryAsync(cancellationToken);
+
+        return tempTableName;
+    }
+
+    private async Task DropTempTablesAsync(
+        SqlConnection connection,
+        IReadOnlyCollection<string> tempTableNames,
+        CancellationToken cancellationToken)
+    {
+        foreach (var tempTableName in tempTableNames.Reverse())
+        {
+            try
+            {
+                await _sql.ExecuteNonQueryAsync(
+                    connection,
+                    $"DROP TABLE IF EXISTS {tempTableName};",
+                    cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Failed to drop temp table {TempTableName}.", tempTableName);
+            }
         }
     }
 
