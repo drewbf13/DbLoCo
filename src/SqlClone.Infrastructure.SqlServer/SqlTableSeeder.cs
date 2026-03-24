@@ -10,6 +10,8 @@ namespace SqlClone.Infrastructure.SqlServer;
 
 public sealed class SqlTableSeeder : ITableSeeder
 {
+    public readonly record struct SeedExecutionLevel(int OrderKey, int GroupKey, IReadOnlyList<SeedTablePlan> Tables);
+
     private const int MaxConcurrentSeedOperationsPerLevel = 8;
     private const int MetadataQueryTimeoutSeconds = 180;
     private const int SeedSourceQueryTimeoutSeconds = 600;
@@ -59,10 +61,7 @@ public sealed class SqlTableSeeder : ITableSeeder
         {
             disabledIndexesByDatabase = await DisableNonClusteredIndexesAsync(tables, cancellationToken);
 
-            var dependencyLevels = tables
-                .GroupBy(table => table.Order > 0 ? table.Order : table.GroupKey)
-                .OrderBy(group => group.Key)
-                .ToList();
+            var dependencyLevels = BuildSeedExecutionLevels(tables);
 
             foreach (var dependencyLevel in dependencyLevels)
             {
@@ -70,12 +69,12 @@ public sealed class SqlTableSeeder : ITableSeeder
 
                 _logger.LogInformation(
                     "Starting seed dependency level {LevelKey} ({TableCount} table(s), max parallel {MaxParallel}).",
-                    dependencyLevel.Key,
-                    dependencyLevel.Count(),
+                    $"order:{dependencyLevel.OrderKey}/group:{dependencyLevel.GroupKey}",
+                    dependencyLevel.Tables.Count,
                     MaxConcurrentSeedOperationsPerLevel);
 
                 using var concurrencyGate = new SemaphoreSlim(MaxConcurrentSeedOperationsPerLevel);
-                var levelTasks = dependencyLevel
+                var levelTasks = dependencyLevel.Tables
                     .Select(table => SeedTableWithWarningThrottledAsync(table, tablePlanLookup, concurrencyGate, cancellationToken))
                     .ToArray();
 
@@ -83,8 +82,8 @@ public sealed class SqlTableSeeder : ITableSeeder
 
                 _logger.LogInformation(
                     "Completed seed dependency level {LevelKey} ({TableCount} table(s)).",
-                    dependencyLevel.Key,
-                    dependencyLevel.Count());
+                    $"order:{dependencyLevel.OrderKey}/group:{dependencyLevel.GroupKey}",
+                    dependencyLevel.Tables.Count);
             }
         }
         finally
@@ -143,6 +142,20 @@ public sealed class SqlTableSeeder : ITableSeeder
                 concurrencyGate.Release();
             }
         }
+    }
+
+    public static IReadOnlyList<SeedExecutionLevel> BuildSeedExecutionLevels(IReadOnlyList<SeedTablePlan> tables)
+    {
+        return tables
+            .GroupBy(table => new
+            {
+                OrderKey = table.Order > 0 ? table.Order : table.GroupKey,
+                GroupKey = table.GroupKey > 0 ? table.GroupKey : 1
+            })
+            .OrderBy(group => group.Key.OrderKey)
+            .ThenBy(group => group.Key.GroupKey)
+            .Select(group => new SeedExecutionLevel(group.Key.OrderKey, group.Key.GroupKey, group.ToList()))
+            .ToList();
     }
 
 

@@ -79,4 +79,38 @@ public sealed class SqlTableSeederTests
 
         SqlTableSeeder.IsExplicitlyPrioritizedParent(schema, table, configured).Should().Be(expected);
     }
+
+    [Fact]
+    public void BuildSeedExecutionLevels_SplitsSameOrderAcrossDifferentGroups()
+    {
+        var tables = new[]
+        {
+            new SeedTablePlan { SourceDatabase = "AppDb", TargetDatabase = "AppDb", Schema = "dbo", Table = "A", Order = 10, GroupKey = 1 },
+            new SeedTablePlan { SourceDatabase = "AppDb", TargetDatabase = "AppDb", Schema = "dbo", Table = "B", Order = 10, GroupKey = 2 }
+        };
+
+        var levels = SqlTableSeeder.BuildSeedExecutionLevels(tables);
+
+        levels.Should().HaveCount(2);
+        levels[0].OrderKey.Should().Be(10);
+        levels[0].GroupKey.Should().Be(1);
+        levels[0].Tables.Select(t => t.Table).Should().Equal("A");
+        levels[1].OrderKey.Should().Be(10);
+        levels[1].GroupKey.Should().Be(2);
+        levels[1].Tables.Select(t => t.Table).Should().Equal("B");
+    }
+
+    [Fact]
+    public void BuildSeedExecutionLevels_UsesGroupKeyAsFallbackOrderWhenOrderNotSet()
+    {
+        var tables = new[]
+        {
+            new SeedTablePlan { SourceDatabase = "AppDb", TargetDatabase = "AppDb", Schema = "dbo", Table = "A", Order = 0, GroupKey = 5 },
+            new SeedTablePlan { SourceDatabase = "AppDb", TargetDatabase = "AppDb", Schema = "dbo", Table = "B", Order = 0, GroupKey = 2 }
+        };
+
+        var levels = SqlTableSeeder.BuildSeedExecutionLevels(tables);
+
+        levels.Select(level => (level.OrderKey, level.GroupKey)).Should().Equal((2, 2), (5, 5));
+    }
 }

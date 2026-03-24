@@ -249,7 +249,7 @@ Ordering notes:
 
 - **Migration ordering** is controlled by your migration tool/repo (via `BuildCommand`). SqlClone invokes that command once.
 - **Seed ordering** is controlled by `Clone:Seed:Tables[*]:Order` (ascending). Tables in the same order value are seeded in parallel.
-- **Seed grouping metadata** is provided by `Clone:Seed:Tables[*]:GroupKey` (for example domain/schema lanes in generated config) and is used as a deterministic tie-breaker.
+- **Seed grouping metadata** is provided by `Clone:Seed:Tables[*]:GroupKey` (for example domain/schema lanes in generated config). SqlClone executes one `(Order, GroupKey)` lane at a time; tables only run in parallel when they share both values.
 - **Seed row limiting** can be configured with `Clone:Seed:Tables[*]:LatestRows` plus optional `LatestOrderBy` (defaults to primary key descending). Child tables that reference limited parent tables are automatically filtered to rows whose foreign keys exist in the parent's selected set, and this is applied recursively through deeper parent/child chains.
 - **Inherited parent-filter priority override** can be configured with `Clone:Seed:InheritedParentFilterPriorityTables` (`schema.table` or `table`). When SqlClone must cap recursive parent filters to avoid FK-filter explosion, listed tables are prioritized so they remain in the selected parent set.
 - **Nested seed config** is supported via `Clone:Seed:Tables[*]:Children`. Child entries inherit source/target/schema/order/group defaults from their parent unless overridden.
@@ -259,7 +259,7 @@ Ordering notes:
 
 Parallelism notes:
 
-- Seeding runs in **dependency levels** keyed by `Order` (or `GroupKey` when `Order` is not set). Only tables in the same level run concurrently.
+- Seeding runs in **dependency levels** keyed by `(Order, GroupKey)` (or `(GroupKey, GroupKey)` when `Order` is not set). Only tables in the same level run concurrently.
 - If you observe only one running seed task, it usually means each table resolved to a different dependency level (or unresolved cyclic tables were intentionally split into single-table levels).
 - A failed table does not permanently reduce concurrency by itself; retries stay within that table's slot and other tables in the same level continue running up to the configured max.
 
