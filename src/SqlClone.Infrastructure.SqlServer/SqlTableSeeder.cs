@@ -51,32 +51,43 @@ public sealed class SqlTableSeeder : ITableSeeder
 
         _logger.LogInformation("Starting seed for {TotalTables} table(s).", totalTables);
 
-        var dependencyLevels = tables
-            .GroupBy(table => table.Order > 0 ? table.Order : table.GroupKey)
-            .OrderBy(group => group.Key)
-            .ToList();
+        var disabledIndexesByDatabase = new Dictionary<string, List<IndexRef>>(StringComparer.OrdinalIgnoreCase);
 
-        foreach (var dependencyLevel in dependencyLevels)
+        try
         {
-            cancellationToken.ThrowIfCancellationRequested();
+            disabledIndexesByDatabase = await DisableNonClusteredIndexesAsync(tables, cancellationToken);
 
-            _logger.LogInformation(
-                "Starting seed dependency level {LevelKey} ({TableCount} table(s), max parallel {MaxParallel}).",
-                dependencyLevel.Key,
-                dependencyLevel.Count(),
-                MaxConcurrentSeedOperationsPerLevel);
+            var dependencyLevels = tables
+                .GroupBy(table => table.Order > 0 ? table.Order : table.GroupKey)
+                .OrderBy(group => group.Key)
+                .ToList();
 
-            using var concurrencyGate = new SemaphoreSlim(MaxConcurrentSeedOperationsPerLevel);
-            var levelTasks = dependencyLevel
-                .Select(table => SeedTableWithWarningThrottledAsync(table, tablePlanLookup, concurrencyGate, cancellationToken))
-                .ToArray();
+            foreach (var dependencyLevel in dependencyLevels)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
 
-            await Task.WhenAll(levelTasks);
+                _logger.LogInformation(
+                    "Starting seed dependency level {LevelKey} ({TableCount} table(s), max parallel {MaxParallel}).",
+                    dependencyLevel.Key,
+                    dependencyLevel.Count(),
+                    MaxConcurrentSeedOperationsPerLevel);
 
-            _logger.LogInformation(
-                "Completed seed dependency level {LevelKey} ({TableCount} table(s)).",
-                dependencyLevel.Key,
-                dependencyLevel.Count());
+                using var concurrencyGate = new SemaphoreSlim(MaxConcurrentSeedOperationsPerLevel);
+                var levelTasks = dependencyLevel
+                    .Select(table => SeedTableWithWarningThrottledAsync(table, tablePlanLookup, concurrencyGate, cancellationToken))
+                    .ToArray();
+
+                await Task.WhenAll(levelTasks);
+
+                _logger.LogInformation(
+                    "Completed seed dependency level {LevelKey} ({TableCount} table(s)).",
+                    dependencyLevel.Key,
+                    dependencyLevel.Count());
+            }
+        }
+        finally
+        {
+            await RebuildDisabledIndexesAsync(disabledIndexesByDatabase, CancellationToken.None);
         }
 
         _logger.LogInformation(
@@ -1140,6 +1151,8 @@ SET IDENTITY_INSERT {destinationName} OFF;";
             new(database.Trim(), schema.Trim(), table.Trim());
     }
 
+    private sealed record IndexRef(string Schema, string Table, string Name);
+
     private sealed record ForeignKeyRelationship(
         string ReferencedSchema,
         string ReferencedTable,
@@ -1148,6 +1161,120 @@ SET IDENTITY_INSERT {destinationName} OFF;";
     private sealed record ForeignKeyColumnPair(string ChildColumn, string ParentColumn);
     internal sealed record InheritedParentFilter(string SqlClause, string ParentTable, int PriorityScore);
     private sealed record TableSelectionQuery(string Sql, bool IsConstrained);
+
+    private async Task<Dictionary<string, List<IndexRef>>> DisableNonClusteredIndexesAsync(
+        IReadOnlyList<SeedTablePlan> tables,
+        CancellationToken cancellationToken)
+    {
+        var targetTablesByDatabase = tables
+            .Select(table => TableRefKey.Create(table.TargetDatabase, table.Schema, table.Table))
+            .Distinct()
+            .GroupBy(table => table.Database, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.ToList(), StringComparer.OrdinalIgnoreCase);
+
+        var disabledIndexesByDatabase = new Dictionary<string, List<IndexRef>>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var (database, targetTables) in targetTablesByDatabase)
+        {
+            await using var connection = _connectionFactory.CreateTargetConnection(database);
+            await SqlClientTransientRetry.OpenWithRetryAsync(connection, MaxSeedAttempts, cancellationToken);
+
+            var indexes = await LoadDisableCandidateIndexesAsync(connection, targetTables, cancellationToken);
+            if (indexes.Count == 0)
+            {
+                continue;
+            }
+
+            var disabledIndexes = new List<IndexRef>();
+            foreach (var index in indexes)
+            {
+                var disableSql =
+                    $"ALTER INDEX [{EscapeIdentifier(index.Name)}] ON [{EscapeIdentifier(index.Schema)}].[{EscapeIdentifier(index.Table)}] DISABLE;";
+                await _sql.ExecuteNonQueryAsync(connection, disableSql, cancellationToken);
+                disabledIndexes.Add(index);
+            }
+
+            disabledIndexesByDatabase[database] = disabledIndexes;
+
+            _logger.LogInformation(
+                "Disabled {IndexCount} nonclustered index(es) in {Database} before seed import.",
+                disabledIndexes.Count,
+                database);
+        }
+
+        return disabledIndexesByDatabase;
+    }
+
+    private async Task RebuildDisabledIndexesAsync(
+        IReadOnlyDictionary<string, List<IndexRef>> disabledIndexesByDatabase,
+        CancellationToken cancellationToken)
+    {
+        foreach (var (database, indexes) in disabledIndexesByDatabase)
+        {
+            await using var connection = _connectionFactory.CreateTargetConnection(database);
+            await SqlClientTransientRetry.OpenWithRetryAsync(connection, MaxSeedAttempts, cancellationToken);
+
+            foreach (var index in indexes)
+            {
+                var rebuildSql =
+                    $"ALTER INDEX [{EscapeIdentifier(index.Name)}] ON [{EscapeIdentifier(index.Schema)}].[{EscapeIdentifier(index.Table)}] REBUILD;";
+                await _sql.ExecuteNonQueryAsync(connection, rebuildSql, cancellationToken);
+            }
+
+            _logger.LogInformation(
+                "Rebuilt {IndexCount} nonclustered index(es) in {Database} after seed import.",
+                indexes.Count,
+                database);
+        }
+    }
+
+    private static async Task<List<IndexRef>> LoadDisableCandidateIndexesAsync(
+        SqlConnection target,
+        IReadOnlyCollection<TableRefKey> targetTables,
+        CancellationToken cancellationToken)
+    {
+        if (targetTables.Count == 0)
+        {
+            return [];
+        }
+
+        var predicates = new List<string>();
+        await using var command = target.CreateCommand();
+        command.CommandTimeout = MetadataQueryTimeoutSeconds;
+
+        var parameterIndex = 0;
+        foreach (var table in targetTables)
+        {
+            var schemaParameter = $"@schema{parameterIndex}";
+            var tableParameter = $"@table{parameterIndex}";
+            predicates.Add($"(s.name = {schemaParameter} AND t.name = {tableParameter})");
+            command.Parameters.AddWithValue(schemaParameter, table.Schema);
+            command.Parameters.AddWithValue(tableParameter, table.Table);
+            parameterIndex++;
+        }
+
+        command.CommandText = $@"
+SELECT s.name, t.name, i.name
+FROM sys.indexes i
+INNER JOIN sys.tables t ON i.object_id = t.object_id
+INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
+WHERE i.type_desc = 'NONCLUSTERED'
+  AND i.is_primary_key = 0
+  AND i.is_unique_constraint = 0
+  AND i.is_hypothetical = 0
+  AND i.is_disabled = 0
+  AND ({string.Join(" OR ", predicates)})
+ORDER BY s.name, t.name, i.name;";
+
+        var indexes = new List<IndexRef>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            indexes.Add(new IndexRef(reader.GetString(0), reader.GetString(1), reader.GetString(2)));
+        }
+
+        return indexes;
+    }
 
     private static string EscapeIdentifier(string value) => value.Replace("]", "]]", StringComparison.Ordinal);
 
