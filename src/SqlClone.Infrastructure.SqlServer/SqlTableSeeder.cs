@@ -436,7 +436,10 @@ public sealed class SqlTableSeeder : ITableSeeder
     }
 
     private bool UsesLinkedServerSeedStrategy() =>
-        string.Equals(_seedOptions.Strategy, SeedStrategy.LinkedServer, StringComparison.OrdinalIgnoreCase);
+        IsLinkedServerStrategy(_seedOptions.Strategy);
+
+    internal static bool IsLinkedServerStrategy(string? strategy) =>
+        string.Equals(strategy, SeedStrategy.LinkedServer, StringComparison.OrdinalIgnoreCase);
 
     private async Task SeedTableViaLinkedServerAsync(
         SeedTablePlan table,
@@ -487,7 +490,8 @@ public sealed class SqlTableSeeder : ITableSeeder
         var destinationName = $"[{escapedSchema}].[{escapedTable}]";
         var sourceName = $"[{EscapeIdentifier(linkedServerName)}].[{EscapeIdentifier(table.SourceDatabase)}].[{escapedSchema}].[{escapedTable}]";
         var escapedColumns = string.Join(", ", columnList.Select(c => $"[{EscapeIdentifier(c)}]"));
-        var orderByClause = await BuildLinkedServerOrderByClauseAsync(target, columnList, table, effectiveCancellationToken);
+        var primaryKeyColumns = await LoadPrimaryKeyColumnListAsync(target, table, effectiveCancellationToken);
+        var orderByClause = BuildLinkedServerOrderByClause(columnList, primaryKeyColumns, table);
         var sourceSelectionSql = table.LatestRows is > 0
             ? $"SELECT TOP ({table.LatestRows.Value}) {escapedColumns} FROM {sourceName} ORDER BY {orderByClause}"
             : $"SELECT {escapedColumns} FROM {sourceName}";
@@ -598,21 +602,19 @@ ORDER BY ORDINAL_POSITION;";
         return columns;
     }
 
-    private static async Task<string> BuildLinkedServerOrderByClauseAsync(
-        SqlConnection target,
+    internal static string BuildLinkedServerOrderByClause(
         IReadOnlyCollection<string> selectedColumns,
-        SeedTablePlan table,
-        CancellationToken cancellationToken)
+        IReadOnlyCollection<string> primaryKeyColumns,
+        SeedTablePlan table)
     {
         if (!string.IsNullOrWhiteSpace(table.LatestOrderBy))
         {
             return table.LatestOrderBy!;
         }
 
-        var primaryKeys = await LoadPrimaryKeyColumnListAsync(target, table, cancellationToken);
-        if (primaryKeys.Count > 0)
+        if (primaryKeyColumns.Count > 0)
         {
-            return string.Join(", ", primaryKeys.Select(column => $"[{EscapeIdentifier(column)}] DESC"));
+            return string.Join(", ", primaryKeyColumns.Select(column => $"[{EscapeIdentifier(column)}] DESC"));
         }
 
         return selectedColumns
