@@ -49,4 +49,34 @@ public sealed class SqlTableSeederTests
     {
         SqlTableSeeder.IsLinkedServerStrategy(strategy).Should().Be(expected);
     }
+
+    [Fact]
+    public void BuildInheritedParentFilterPriorityLookup_NormalizesAndDropsWhitespaceEntries()
+    {
+        var lookup = SqlTableSeeder.BuildInheritedParentFilterPriorityLookup([
+            " dbo.Customer ",
+            "",
+            "   ",
+            "Orders"
+        ]);
+
+        lookup.Should().BeEquivalentTo(["dbo.Customer", "Orders"]);
+    }
+
+    [Theory]
+    [InlineData("dbo", "Customer", true)]
+    [InlineData("sales", "Orders", true)]
+    [InlineData("dbo", "Invoice", false)]
+    public void IsExplicitlyPrioritizedParent_MatchesSchemaQualifiedOrTableOnlyEntries(
+        string schema,
+        string table,
+        bool expected)
+    {
+        var configured = SqlTableSeeder.BuildInheritedParentFilterPriorityLookup([
+            "dbo.Customer",
+            "Orders"
+        ]);
+
+        SqlTableSeeder.IsExplicitlyPrioritizedParent(schema, table, configured).Should().Be(expected);
+    }
 }

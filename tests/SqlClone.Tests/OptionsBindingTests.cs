@@ -28,6 +28,8 @@ public sealed class OptionsBindingTests
                 ["Clone:Seed:LinkedServerName"] = "REMOTEDEV",
                 ["Clone:Seed:SourceDatabase"] = "DbOne",
                 ["Clone:Seed:ExcludeSchemas:0"] = "audit",
+                ["Clone:Seed:InheritedParentFilterPriorityTables:0"] = "dbo.Customer",
+                ["Clone:Seed:InheritedParentFilterPriorityTables:1"] = "Orders",
                 ["Clone:Seed:Tables:0:Table"] = "Lookup",
                 ["Clone:Seed:Tables:0:Schema"] = "dbo",
                 ["Clone:Seed:Tables:0:TruncateTarget"] = "true",
@@ -61,6 +63,7 @@ public sealed class OptionsBindingTests
         options.Seed.Strategy.Should().Be("LinkedServer");
         options.Seed.LinkedServerName.Should().Be("REMOTEDEV");
         options.Seed.ExcludeSchemas.Should().ContainSingle().Which.Should().Be("audit");
+        options.Seed.InheritedParentFilterPriorityTables.Should().Equal("dbo.Customer", "Orders");
         options.Seed.Tables.Should().ContainSingle();
         options.Seed.Tables[0].Order.Should().Be(20);
         options.Seed.Tables[0].GroupKey.Should().Be(2);

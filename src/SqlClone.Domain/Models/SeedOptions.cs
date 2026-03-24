@@ -7,6 +7,7 @@ public sealed class SeedOptions
     public bool Enabled { get; set; }
     public string SourceDatabase { get; set; } = string.Empty;
     public List<string> ExcludeSchemas { get; set; } = [];
+    public List<string> InheritedParentFilterPriorityTables { get; set; } = [];
     public List<SeedTableOptions> Tables { get; set; } = [];
 }
 
