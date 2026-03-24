@@ -1,4 +1,5 @@
 using FluentAssertions;
+using SqlClone.Domain.Models;
 using SqlClone.Infrastructure.SqlServer;
 
 namespace SqlClone.Tests;
@@ -35,5 +36,17 @@ public sealed class SqlTableSeederTests
         selected.Should().Equal(
             new SqlTableSeeder.InheritedParentFilter("clause-b", "dbo.Alpha", 20),
             new SqlTableSeeder.InheritedParentFilter("clause-a", "dbo.Zeta", 20));
+    }
+
+    [Theory]
+    [InlineData(SeedStrategy.LinkedServer, true)]
+    [InlineData("linkedserver", true)]
+    [InlineData("LINKEDSERVER", true)]
+    [InlineData(SeedStrategy.BulkCopy, false)]
+    [InlineData("", false)]
+    [InlineData(null, false)]
+    public void IsLinkedServerStrategy_ReturnsExpected(string? strategy, bool expected)
+    {
+        SqlTableSeeder.IsLinkedServerStrategy(strategy).Should().Be(expected);
     }
 }

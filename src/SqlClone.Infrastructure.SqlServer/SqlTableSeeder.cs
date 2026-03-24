@@ -436,7 +436,10 @@ public sealed class SqlTableSeeder : ITableSeeder
     }
 
     private bool UsesLinkedServerSeedStrategy() =>
-        string.Equals(_seedOptions.Strategy, SeedStrategy.LinkedServer, StringComparison.OrdinalIgnoreCase);
+        IsLinkedServerStrategy(_seedOptions.Strategy);
+
+    internal static bool IsLinkedServerStrategy(string? strategy) =>
+        string.Equals(strategy, SeedStrategy.LinkedServer, StringComparison.OrdinalIgnoreCase);
 
     private async Task SeedTableViaLinkedServerAsync(
         SeedTablePlan table,
@@ -582,6 +585,7 @@ ORDER BY ORDINAL_POSITION;";
 
         return columns;
     }
+
 
     private static async Task<long> ExecuteScalarInt64Async(
         SqlConnection connection,
