@@ -1,5 +1,6 @@
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using SqlClone.Domain.Interfaces;
 using SqlClone.Domain.Models;
 using System.Collections.Concurrent;
@@ -23,15 +24,18 @@ public sealed class SqlTableSeeder : ITableSeeder
     private readonly SqlConnectionFactory _connectionFactory;
     private readonly SqlExecutionHelper _sql;
     private readonly ILogger<SqlTableSeeder> _logger;
+    private readonly SeedOptions _seedOptions;
 
     public SqlTableSeeder(
         SqlConnectionFactory connectionFactory,
         SqlExecutionHelper sql,
-        ILogger<SqlTableSeeder> logger)
+        ILogger<SqlTableSeeder> logger,
+        IOptions<CloneOptions> options)
     {
         _connectionFactory = connectionFactory;
         _sql = sql;
         _logger = logger;
+        _seedOptions = options.Value.Seed;
     }
 
     public async Task SeedAsync(IReadOnlyList<SeedTablePlan> tables, CancellationToken cancellationToken)
@@ -258,6 +262,12 @@ public sealed class SqlTableSeeder : ITableSeeder
         int maxInheritedParentFilters,
         CancellationToken cancellationToken)
     {
+        if (UsesLinkedServerSeedStrategy())
+        {
+            await SeedTableViaLinkedServerAsync(table, planLookup, maxInheritedParentFilters, cancellationToken);
+            return;
+        }
+
         using var attemptTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         attemptTimeout.CancelAfter(SeedAttemptTimeout);
         var effectiveCancellationToken = attemptTimeout.Token;
@@ -425,6 +435,133 @@ public sealed class SqlTableSeeder : ITableSeeder
         }
     }
 
+    private bool UsesLinkedServerSeedStrategy() =>
+        IsLinkedServerStrategy(_seedOptions.Strategy);
+
+    internal static bool IsLinkedServerStrategy(string? strategy) =>
+        string.Equals(strategy, SeedStrategy.LinkedServer, StringComparison.OrdinalIgnoreCase);
+
+    private async Task SeedTableViaLinkedServerAsync(
+        SeedTablePlan table,
+        IReadOnlyDictionary<TableRefKey, SeedTablePlan> planLookup,
+        int maxInheritedParentFilters,
+        CancellationToken cancellationToken)
+    {
+        using var attemptTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        attemptTimeout.CancelAfter(SeedAttemptTimeout);
+        var effectiveCancellationToken = attemptTimeout.Token;
+
+        var linkedServerName = _seedOptions.LinkedServerName;
+        if (string.IsNullOrWhiteSpace(linkedServerName))
+        {
+            throw new InvalidOperationException(
+                $"Seed strategy is '{SeedStrategy.LinkedServer}' but Seed.LinkedServerName is not configured.");
+        }
+
+        var stopwatch = Stopwatch.StartNew();
+        _logger.LogInformation(
+            "Starting linked-server seed for {SourceDatabase}.{Schema}.{Table} -> {TargetDatabase}.{Schema}.{Table} via {LinkedServer}.",
+            table.SourceDatabase,
+            table.Schema,
+            table.Table,
+            table.TargetDatabase,
+            table.Schema,
+            table.Table,
+            linkedServerName);
+
+        await using var source = _connectionFactory.CreateSourceConnection(table.SourceDatabase);
+        await using var target = _connectionFactory.CreateTargetConnection(table.TargetDatabase);
+        await SqlClientTransientRetry.OpenWithRetryAsync(source, MaxSeedAttempts, effectiveCancellationToken);
+        await SqlClientTransientRetry.OpenWithRetryAsync(target, MaxSeedAttempts, effectiveCancellationToken);
+
+        var computedColumns = await LoadComputedColumnListAsync(target, table, effectiveCancellationToken);
+        var targetColumns = await LoadColumnListAsync(target, table, effectiveCancellationToken);
+        var sourceColumns = await LoadColumnListAsync(source, table, effectiveCancellationToken);
+
+        var columnList = targetColumns
+            .Where(column => sourceColumns.Contains(column, StringComparer.OrdinalIgnoreCase))
+            .Where(column => !computedColumns.Contains(column, StringComparer.OrdinalIgnoreCase))
+            .ToList();
+
+        if (columnList.Count == 0)
+        {
+            throw new InvalidOperationException(
+                $"No compatible writable columns found while seeding {table.SourceDatabase}.{table.Schema}.{table.Table} via linked server '{linkedServerName}'.");
+        }
+
+        var escapedSchema = EscapeIdentifier(table.Schema);
+        var escapedTable = EscapeIdentifier(table.Table);
+        var destinationName = $"[{escapedSchema}].[{escapedTable}]";
+        var escapedColumns = string.Join(", ", columnList.Select(c => $"[{EscapeIdentifier(c)}]"));
+
+        // Build an FK-aware selection query that uses 4-part linked-server names so that it
+        // can be executed on the target connection with the same dependency-based filtering
+        // that the BulkCopy path applies.
+        var linkedServerPrefix = $"[{EscapeIdentifier(linkedServerName)}].[{EscapeIdentifier(table.SourceDatabase)}]";
+        var selectionCache = new Dictionary<TableRefKey, TableSelectionQuery>();
+        var sourceSelection = await BuildTableSelectionQueryAsync(
+            source,
+            table,
+            planLookup,
+            selectionCache,
+            new HashSet<TableRefKey>(),
+            maxInheritedParentFilters,
+            effectiveCancellationToken,
+            linkedServerPrefix);
+
+        var stageTableName = $"#Seed_{Guid.NewGuid():N}";
+        var stageAndCountSql = $@"
+SELECT {escapedColumns}
+INTO {stageTableName}
+FROM ({sourceSelection.Sql}) AS [src];
+SELECT COUNT_BIG(*) FROM {stageTableName};";
+        var copiedRows = await ExecuteScalarInt64Async(target, stageAndCountSql, SeedSourceQueryTimeoutSeconds, effectiveCancellationToken);
+
+        if (table.TruncateTarget)
+        {
+            await _sql.ExecuteNonQueryAsync(target, $"TRUNCATE TABLE {destinationName};", effectiveCancellationToken);
+        }
+
+        var identityColumns = await LoadIdentityColumnListAsync(target, table, effectiveCancellationToken);
+        var includesIdentityColumns = columnList.Any(c => identityColumns.Contains(c, StringComparer.OrdinalIgnoreCase));
+        var insertSql = $@"
+INSERT INTO {destinationName} ({escapedColumns})
+SELECT {escapedColumns}
+FROM {stageTableName};";
+
+        if (includesIdentityColumns)
+        {
+            insertSql = WrapWithIdentityInsert(destinationName, insertSql);
+        }
+
+        await _sql.ExecuteNonQueryAsync(target, insertSql, effectiveCancellationToken);
+        await _sql.ExecuteNonQueryAsync(target, $"DROP TABLE {stageTableName};", effectiveCancellationToken);
+
+        stopwatch.Stop();
+        _logger.LogInformation(
+            "Linked-server seeded {SourceDatabase}.{Schema}.{Table} into {TargetDatabase}.{Schema}.{Table} in {ElapsedMs} ms ({RowsCopied} row(s) copied, strategy {Strategy}, linked server {LinkedServer}).",
+            table.SourceDatabase,
+            table.Schema,
+            table.Table,
+            table.TargetDatabase,
+            table.Schema,
+            table.Table,
+            stopwatch.ElapsedMilliseconds,
+            copiedRows,
+            SeedStrategy.LinkedServer,
+            linkedServerName);
+
+        if (computedColumns.Count > 0)
+        {
+            _logger.LogInformation(
+                "Skipped computed columns for {TargetDatabase}.{Schema}.{Table}: {Columns}",
+                table.TargetDatabase,
+                table.Schema,
+                table.Table,
+                string.Join(", ", computedColumns.OrderBy(c => c, StringComparer.OrdinalIgnoreCase)));
+        }
+    }
+
     private static async Task<List<string>> LoadColumnListAsync(SqlConnection source, SeedTablePlan table, CancellationToken cancellationToken)
     {
         const string sql = @"
@@ -447,6 +584,26 @@ ORDER BY ORDINAL_POSITION;";
         }
 
         return columns;
+    }
+
+
+
+    private static async Task<long> ExecuteScalarInt64Async(
+        SqlConnection connection,
+        string sql,
+        int timeoutSeconds,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.CommandTimeout = timeoutSeconds;
+        var result = await command.ExecuteScalarAsync(cancellationToken);
+        if (result is null || result is DBNull)
+        {
+            return 0L;
+        }
+
+        return Convert.ToInt64(result);
     }
 
     private static async Task<long> LoadSourceRowCountAsync(
@@ -582,7 +739,8 @@ WHERE TABLE_SCHEMA = @schema
         IDictionary<TableRefKey, TableSelectionQuery> selectionCache,
         ISet<TableRefKey> recursionStack,
         int maxInheritedParentFilters,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? tableNamePrefix = null)
     {
         var tableKey = TableRefKey.Create(table.SourceDatabase, table.Schema, table.Table);
         if (selectionCache.TryGetValue(tableKey, out var cachedSelection))
@@ -598,7 +756,10 @@ WHERE TABLE_SCHEMA = @schema
 
         try
         {
-            var sourceTableName = $"[{EscapeIdentifier(table.Schema)}].[{EscapeIdentifier(table.Table)}]";
+            var twoPartName = $"[{EscapeIdentifier(table.Schema)}].[{EscapeIdentifier(table.Table)}]";
+            var sourceTableName = tableNamePrefix is not null
+                ? $"{tableNamePrefix}.{twoPartName}"
+                : twoPartName;
             var fkRelationships = await LoadForeignKeyRelationshipsAsync(source, table, cancellationToken);
             var nullableChildColumns = await LoadNullableColumnLookupAsync(source, table, cancellationToken);
             var inheritedClauses = new List<InheritedParentFilter>();
@@ -618,7 +779,8 @@ WHERE TABLE_SCHEMA = @schema
                     selectionCache,
                     recursionStack,
                     maxInheritedParentFilters,
-                    cancellationToken);
+                    cancellationToken,
+                    tableNamePrefix);
 
                 if (!parentSelection.IsConstrained)
                 {

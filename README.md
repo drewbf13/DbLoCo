@@ -48,6 +48,8 @@ Important settings:
 - `Clone:Restore:Databases`
 - `Clone:Migration:Enabled` / (`GitRepository` or `LocalRepositoryPath`) / `Branch` / `BuildCommand`
 - `Clone:Seed:Enabled` / `SourceDatabase` / `Tables`
+  - Optional seeding strategy switch: `Clone:Seed:Strategy` (`BulkCopy` or `LinkedServer`)
+  - Linked-server strategy setting: `Clone:Seed:LinkedServerName`
 - `Clone:LinkedServers:Definitions`
   - Optional SQL auth mapping per linked server: `UserId` + `Password`
 - `Clone:PostClone:ScriptFolders`
@@ -300,6 +302,57 @@ Example:
 ```
 
 In this example, `AuditEvents` is limited to the latest 5,000 rows, while `ReferenceData` is copied in full.
+
+### Alternative seeding strategy: linked-server pushdown (with normal SqlClone logging)
+
+If you want seeding to execute through linked-server SQL on the target instance **and still use the normal SqlClone seeding pipeline/logging**, set:
+
+```json
+"Seed": {
+  "Enabled": true,
+  "Strategy": "LinkedServer",
+  "LinkedServerName": "REMOTEDEV",
+  "SourceDatabase": "AppDb",
+  "Tables": [
+    {
+      "TargetDatabase": "AppDb",
+      "Schema": "dbo",
+      "Table": "ReferenceData",
+      "TruncateTarget": true
+    }
+  ]
+}
+```
+
+With `Strategy: LinkedServer`, SqlClone still orchestrates seeding as usual (ordering/retries/logging), but each table seed operation stages rows with `SELECT ... INTO #temp` from the linked server and inserts into the target table using only shared writable columns.
+
+At a high level, linked-server pushdown uses patterns like:
+
+```sql
+-- source metadata
+SELECT COLUMN_NAME
+FROM [SOURCE_LINKED].[AppDb].INFORMATION_SCHEMA.COLUMNS
+WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = 'ReferenceData';
+
+-- target metadata
+SELECT c.name, c.is_identity, c.is_computed
+FROM [AppDb].sys.columns c
+JOIN [AppDb].sys.tables t ON c.object_id = t.object_id
+JOIN [AppDb].sys.schemas s ON t.schema_id = s.schema_id
+WHERE s.name = 'dbo' AND t.name = 'ReferenceData';
+
+-- stage source rows server-side
+SELECT shared_columns
+INTO #Seed_ReferenceData
+FROM [SOURCE_LINKED].[AppDb].[dbo].[ReferenceData];
+
+-- then insert into target with shared columns only
+INSERT INTO [AppDb].[dbo].[ReferenceData](shared_columns)
+SELECT shared_columns
+FROM #Seed_ReferenceData;
+```
+
+This keeps the linked-server path inside the same `clone`/seed execution path so you still get structured table-level progress logs.
 
 ## Commands
 

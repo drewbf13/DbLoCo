@@ -24,6 +24,8 @@ public sealed class OptionsBindingTests
                 ["Clone:Migration:Branch"] = "dev",
                 ["Clone:Migration:BuildCommand"] = "dotnet run",
                 ["Clone:Seed:Enabled"] = "true",
+                ["Clone:Seed:Strategy"] = "LinkedServer",
+                ["Clone:Seed:LinkedServerName"] = "REMOTEDEV",
                 ["Clone:Seed:SourceDatabase"] = "DbOne",
                 ["Clone:Seed:ExcludeSchemas:0"] = "audit",
                 ["Clone:Seed:Tables:0:Table"] = "Lookup",
@@ -56,6 +58,8 @@ public sealed class OptionsBindingTests
         options.Migration.LocalRepositoryPath.Should().Be("C:\\repos\\migrations");
         options.Migration.Branch.Should().Be("dev");
         options.Seed.Enabled.Should().BeTrue();
+        options.Seed.Strategy.Should().Be("LinkedServer");
+        options.Seed.LinkedServerName.Should().Be("REMOTEDEV");
         options.Seed.ExcludeSchemas.Should().ContainSingle().Which.Should().Be("audit");
         options.Seed.Tables.Should().ContainSingle();
         options.Seed.Tables[0].Order.Should().Be(20);
