@@ -587,6 +587,7 @@ ORDER BY ORDINAL_POSITION;";
     }
 
 
+
     private static async Task<long> ExecuteScalarInt64Async(
         SqlConnection connection,
         string sql,
