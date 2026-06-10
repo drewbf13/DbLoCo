@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "SqlClone.Console": {
+      "commandName": "Project",
+      "commandLineArgs": "clone --environment Development"
+    }
+  }
+}

@@ -44,6 +44,11 @@ public interface IPostCloneScriptRunner
     Task RunAsync(CancellationToken cancellationToken);
 }
 
+public interface IProgrammableObjectSynchronizer
+{
+    Task SynchronizeAsync(CancellationToken cancellationToken);
+}
+
 public interface ICloneValidator
 {
     Task<ValidationResult> ValidateAsync(CancellationToken cancellationToken);

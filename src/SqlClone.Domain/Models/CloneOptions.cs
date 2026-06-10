@@ -11,6 +11,7 @@ public sealed class CloneOptions
     public LinkedServersOptions LinkedServers { get; set; } = new();
     public MigrationOptions Migration { get; set; } = new();
     public SeedOptions Seed { get; set; } = new();
+    public ProgrammableObjectOptions ProgrammableObjects { get; set; } = new();
     public PostCloneOptions PostClone { get; set; } = new();
 }
 

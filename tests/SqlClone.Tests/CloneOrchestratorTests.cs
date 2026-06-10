@@ -29,8 +29,9 @@ public sealed class CloneOrchestratorTests
             new RecordingMigrationRunner(calls),
             new RecordingSeeder(calls),
             new RecordingLinkedServers(calls),
+            new RecordingProgrammableObjects(calls),
             new RecordingPostClone(calls),
-            new SuccessfulValidator(),
+            new SuccessfulValidator(calls),
             new StaticPlanFactory(plan),
             Options.Create(new CloneOptions()),
             NullLogger<CloneOrchestrator>.Instance);
@@ -45,6 +46,7 @@ public sealed class CloneOrchestratorTests
             "linked-servers",
             "migrations",
             "seed",
+            "programmable-objects",
             "post-clone",
             "validate");
     }
@@ -107,6 +109,15 @@ public sealed class CloneOrchestratorTests
         }
     }
 
+    private sealed class RecordingProgrammableObjects(List<string> calls) : IProgrammableObjectSynchronizer
+    {
+        public Task SynchronizeAsync(CancellationToken cancellationToken)
+        {
+            calls.Add("programmable-objects");
+            return Task.CompletedTask;
+        }
+    }
+
     private sealed class RecordingPostClone(List<string> calls) : IPostCloneScriptRunner
     {
         public Task RunAsync(CancellationToken cancellationToken)
@@ -116,10 +127,11 @@ public sealed class CloneOrchestratorTests
         }
     }
 
-    private sealed class SuccessfulValidator : ICloneValidator
+    private sealed class SuccessfulValidator(List<string> calls) : ICloneValidator
     {
         public Task<ValidationResult> ValidateAsync(CancellationToken cancellationToken)
         {
+            calls.Add("validate");
             return Task.FromResult(new ValidationResult
             {
                 SqlReachable = true,

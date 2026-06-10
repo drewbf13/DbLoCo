@@ -383,16 +383,16 @@ public sealed class SqlTableSeeder : ITableSeeder
         await SqlClientTransientRetry.OpenWithRetryAsync(source, MaxSeedAttempts, effectiveCancellationToken);
         await SqlClientTransientRetry.OpenWithRetryAsync(target, MaxSeedAttempts, effectiveCancellationToken);
 
-        var computedColumns = await LoadComputedColumnListAsync(target, table, effectiveCancellationToken);
+        var excludedColumns = await LoadNonInsertableColumnListAsync(target, table, effectiveCancellationToken);
         var columnList = (await LoadColumnListAsync(source, table, effectiveCancellationToken))
-            .Where(c => !computedColumns.Contains(c, StringComparer.OrdinalIgnoreCase))
+            .Where(c => !excludedColumns.Contains(c, StringComparer.OrdinalIgnoreCase))
             .ToList();
         if (columnList.Count == 0)
         {
-            if (computedColumns.Count > 0)
+            if (excludedColumns.Count > 0)
             {
                 throw new InvalidOperationException(
-                    $"No writable columns found for source table {table.SourceDatabase}.{table.Schema}.{table.Table} after excluding computed columns.");
+                    $"No writable columns found for source table {table.SourceDatabase}.{table.Schema}.{table.Table} after excluding computed/generated columns.");
             }
 
             throw new InvalidOperationException(
@@ -402,7 +402,7 @@ public sealed class SqlTableSeeder : ITableSeeder
         var escapedColumns = string.Join(", ", columnList.Select(c => $"[{EscapeIdentifier(c)}]"));
         var selectionCache = new Dictionary<TableRefKey, TableSelectionQuery>();
         var materializedParentKeyTables = new List<string>();
-        long estimatedRowSizeBytes = 0;
+        var estimatedRowSizeBytes = 0;
         var bulkCopyBatchSize = BulkCopyMinBatchRows;
         var sourceSelection = await BuildTableSelectionQueryAsync(
             source,
@@ -526,14 +526,14 @@ public sealed class SqlTableSeeder : ITableSeeder
             estimatedRowSizeBytes,
             bulkCopyBatchSize);
 
-        if (computedColumns.Count > 0)
+        if (excludedColumns.Count > 0)
         {
             _logger.LogInformation(
-                "Skipped computed columns for {TargetDatabase}.{Schema}.{Table}: {Columns}",
+                "Skipped computed/generated columns for {TargetDatabase}.{Schema}.{Table}: {Columns}",
                 table.TargetDatabase,
                 table.Schema,
                 table.Table,
-                string.Join(", ", computedColumns.OrderBy(c => c, StringComparer.OrdinalIgnoreCase)));
+                string.Join(", ", excludedColumns.OrderBy(c => c, StringComparer.OrdinalIgnoreCase)));
         }
     }
 
@@ -576,13 +576,13 @@ public sealed class SqlTableSeeder : ITableSeeder
         await SqlClientTransientRetry.OpenWithRetryAsync(source, MaxSeedAttempts, effectiveCancellationToken);
         await SqlClientTransientRetry.OpenWithRetryAsync(target, MaxSeedAttempts, effectiveCancellationToken);
 
-        var computedColumns = await LoadComputedColumnListAsync(target, table, effectiveCancellationToken);
+        var excludedColumns = await LoadNonInsertableColumnListAsync(target, table, effectiveCancellationToken);
         var targetColumns = await LoadColumnListAsync(target, table, effectiveCancellationToken);
         var sourceColumns = await LoadColumnListAsync(source, table, effectiveCancellationToken);
 
         var columnList = targetColumns
             .Where(column => sourceColumns.Contains(column, StringComparer.OrdinalIgnoreCase))
-            .Where(column => !computedColumns.Contains(column, StringComparer.OrdinalIgnoreCase))
+            .Where(column => !excludedColumns.Contains(column, StringComparer.OrdinalIgnoreCase))
             .ToList();
 
         if (columnList.Count == 0)
@@ -663,14 +663,14 @@ FROM {stageTableName};";
             await DropTempTablesAsync(target, materializedParentKeyTables, CancellationToken.None);
         }
 
-        if (computedColumns.Count > 0)
+        if (excludedColumns.Count > 0)
         {
             _logger.LogInformation(
-                "Skipped computed columns for {TargetDatabase}.{Schema}.{Table}: {Columns}",
+                "Skipped computed/generated columns for {TargetDatabase}.{Schema}.{Table}: {Columns}",
                 table.TargetDatabase,
                 table.Schema,
                 table.Table,
-                string.Join(", ", computedColumns.OrderBy(c => c, StringComparer.OrdinalIgnoreCase)));
+                string.Join(", ", excludedColumns.OrderBy(c => c, StringComparer.OrdinalIgnoreCase)));
         }
     }
 
@@ -792,8 +792,12 @@ WHERE s.name = @schema
         return columns;
     }
 
-    private static async Task<List<string>> LoadComputedColumnListAsync(SqlConnection target, SeedTablePlan table, CancellationToken cancellationToken)
+    private static async Task<List<string>> LoadNonInsertableColumnListAsync(SqlConnection target, SeedTablePlan table, CancellationToken cancellationToken)
     {
+        // Exclude columns the seeder must never write: computed columns and the GENERATED ALWAYS
+        // period columns of system-versioned (temporal) tables. SQL Server populates period columns
+        // automatically and rejects explicit writes; they are also hidden from SELECT *, so projecting
+        // them off the FK-filter subquery would otherwise fail with "Invalid column name".
         const string sql = @"
 SELECT c.name
 FROM sys.columns c
@@ -801,7 +805,7 @@ INNER JOIN sys.tables t ON c.object_id = t.object_id
 INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
 WHERE s.name = @schema
   AND t.name = @table
-  AND c.is_computed = 1;";
+  AND (c.is_computed = 1 OR c.generated_always_type <> 0);";
 
         await using var command = target.CreateCommand();
         command.CommandText = sql;
