@@ -27,6 +27,13 @@ bld/
 project.lock.json
 project.fragment.lock.json
 artifacts/
+# Local-only secret overrides — never commit. The shareable, secret-free
+# appsettings.json / appsettings.{Environment}.json ARE committed.
+appsettings.Local.json
+# Generated locally by the `init` command from appsettings.json.
+appsettings.example.json
+.vs/*
+*/.vs/*
 
 # ASP.NET Scaffolding
 ScaffoldingReadMe.txt

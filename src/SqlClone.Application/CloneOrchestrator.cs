@@ -12,6 +12,7 @@ public sealed class CloneOrchestrator : ICloneOrchestrator
     private readonly IDatabaseMigrationRunner _migrationRunner;
     private readonly ITableSeeder _tableSeeder;
     private readonly ILinkedServerProvisioner _linkedServers;
+    private readonly IProgrammableObjectSynchronizer _programmableObjects;
     private readonly IPostCloneScriptRunner _postClone;
     private readonly ICloneValidator _validator;
     private readonly IClonePlanFactory _planFactory;
@@ -24,6 +25,7 @@ public sealed class CloneOrchestrator : ICloneOrchestrator
         IDatabaseMigrationRunner migrationRunner,
         ITableSeeder tableSeeder,
         ILinkedServerProvisioner linkedServers,
+        IProgrammableObjectSynchronizer programmableObjects,
         IPostCloneScriptRunner postClone,
         ICloneValidator validator,
         IClonePlanFactory planFactory,
@@ -35,6 +37,7 @@ public sealed class CloneOrchestrator : ICloneOrchestrator
         _migrationRunner = migrationRunner;
         _tableSeeder = tableSeeder;
         _linkedServers = linkedServers;
+        _programmableObjects = programmableObjects;
         _postClone = postClone;
         _validator = validator;
         _planFactory = planFactory;
@@ -59,6 +62,7 @@ public sealed class CloneOrchestrator : ICloneOrchestrator
         await _linkedServers.ApplyAsync(plan.LinkedServers, cancellationToken);
         await _migrationRunner.RunAsync(plan.Migration, cancellationToken);
         await _tableSeeder.SeedAsync(plan.SeedTables, cancellationToken);
+        await _programmableObjects.SynchronizeAsync(cancellationToken);
         await _postClone.RunAsync(cancellationToken);
 
         var validation = await _validator.ValidateAsync(cancellationToken);

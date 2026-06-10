@@ -23,6 +23,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<IDatabaseMigrationRunner, GitDatabaseMigrationRunner>();
         services.AddSingleton<ITableSeeder, SqlTableSeeder>();
         services.AddSingleton<ILinkedServerProvisioner, LinkedServerProvisioner>();
+        services.AddSingleton<IProgrammableObjectSynchronizer, SourceProgrammableObjectSynchronizer>();
         services.AddSingleton<IPostCloneScriptRunner, PostCloneScriptRunner>();
         services.AddSingleton<ICloneValidator, CloneValidator>();
 

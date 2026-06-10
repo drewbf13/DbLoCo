@@ -48,8 +48,6 @@ public sealed class ClonePlanFactory : IClonePlanFactory
                 && !excludedSchemas.Contains(table.Schema))
             .OrderBy(table => table.Order)
             .ThenBy(table => table.GroupKey)
-            .ThenBy(table => table.Schema)
-            .ThenBy(table => table.Table)
             .ToList()
         };
     }

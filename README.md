@@ -22,14 +22,23 @@ SqlClone is a .NET 10 console tool that provisions a local SQL Server Docker con
 
 ## Configuration
 
-Configuration sources (in order):
+Configuration sources (in order, later overrides earlier):
 
 1. `appsettings.json`
-2. `appsettings.{Environment}.json`
-3. `appsettings.Local.json` (optional override)
+2. `appsettings.{Environment}.json` (committed, shared, **secret-free**)
+3. `appsettings.Local.json` (gitignored, **your secrets only**)
 4. Environment variables
 
-Use `appsettings.example.json` as a template.
+The intended split: everything shareable — including the curated seed table list — lives in
+the committed `appsettings.json` / `appsettings.{Environment}.json` so a team can use the
+config directly from source control. **No secrets live in source:**
+
+- Prefer `Authentication=Active Directory Default` in the source connection string so the
+  tool authenticates with each developer's own Azure identity (`az login`) — no password in config.
+- Per-developer secrets (linked-server credentials, or an explicit source connection string
+  when identity-based auth isn't available) go in `appsettings.Local.json`, which is
+  gitignored. Copy `appsettings.Local.example.json` to `appsettings.Local.json` and fill in
+  the values.
 
 Important settings:
 
@@ -52,7 +61,9 @@ Important settings:
   - Linked-server strategy setting: `Clone:Seed:LinkedServerName`
 - `Clone:LinkedServers:Definitions`
   - Optional SQL auth mapping per linked server: `UserId` + `Password`
+- `Clone:ProgrammableObjects:Enabled` / `SourceDatabase` / `TargetDatabase` / `ExcludeSchemas`
 - `Clone:PostClone:ScriptFolders`
+- `Clone:PostClone:Database` (optional; defaults to the first restored database, then the seed source database)
 
 ## Docker + SQL Server notes
 
@@ -65,8 +76,32 @@ When cloning:
 - materializes configured databases
 - applies linked servers
 - runs configured migrations/seeding steps
+- synchronizes programmable objects from the source (see below)
 - executes post-clone scripts (`*.sql`) in lexical order
 - validates SQL reachability, database existence, and linked server existence
+
+## Programmable object sync
+
+When `Clone:ProgrammableObjects:Enabled` is `true` (the default), after migration + seed the
+tool queries the source for the **functions, views, and stored procedures the migrated schema
+is missing** and creates them in the clone from the source's own definitions. This
+auto-captures programmable-object drift — objects that exist in the source environment but in
+no migration — and logs each captured object by name, so every clone run doubles as a drift
+report.
+
+- `SourceDatabase` / `TargetDatabase` default sensibly (seed source / first restored database).
+- `ExcludeSchemas` skips listed schemas in addition to system schemas (e.g. `HangFire`,
+  whose objects are owned by the library rather than your migrations).
+
+## Scripts
+
+- `scripts/regenerate-local-db.ps1` — full rebuild in one command: teardown → clone
+  (migrate → seed → sync programmable objects → post-clone scripts) → validate. Add
+  `-AcrName <registry>` to also snapshot the result and push it as an image.
+- `scripts/build-and-push-image.ps1` — snapshot the seeded container with `docker commit`
+  and push it to an Azure Container Registry so teammates can `docker pull` a ready-to-use
+  database instead of running the clone pipeline themselves. See `scripts/BUILD-IMAGE.md`
+  for details, cautions, and the manual equivalent.
 
 ## Quick answer: copy an Azure SQL Managed Instance DB into local Docker
 
@@ -388,8 +423,9 @@ dotnet run --project src/SqlClone.Console -- teardown
 
 ## First-launch checklist
 
-1. Run `dotnet run --project src/SqlClone.Console -- init` to verify Docker CLI and create local config stubs when missing.
-2. Copy/update `src/SqlClone.Console/appsettings.Local.json` with a real source connection string and secure SA password override.
-3. Run `dotnet run --project src/SqlClone.Console -- clone --environment Development`.
+1. If your source uses Azure AD auth (`Authentication=Active Directory Default`), run `az login` with an account that can reach it.
+2. Copy `src/SqlClone.Console/appsettings.Local.example.json` to `appsettings.Local.json` (gitignored) and fill in your secrets — linked-server credentials, or a full source connection string if you're not using identity-based auth.
+3. Run `dotnet run --project src/SqlClone.Console -- init` to verify the Docker CLI.
+4. Run `dotnet run --project src/SqlClone.Console -- clone --environment Development` (or `scripts/regenerate-local-db.ps1`).
 
 Environment-specific config files are selected from the `--environment` command argument at startup, then overlaid with `appsettings.Local.json` and environment variables.
