@@ -32,8 +32,7 @@ artifacts/
 appsettings.Local.json
 # Generated locally by the `init` command from appsettings.json.
 appsettings.example.json
-.vs/*
-*/.vs/*
+.vs/
 
 # ASP.NET Scaffolding
 ScaffoldingReadMe.txt
