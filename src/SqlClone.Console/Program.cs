@@ -139,7 +139,7 @@ return await root.InvokeAsync(args);
 
 static async Task InitAsync(string environment, IHost host, string configBasePath, CancellationToken cancellationToken)
 {
-    var localFile = Path.Combine(configBasePath, "appsettings.Local.json");
+    var localFile = Path.Combine(Environment.CurrentDirectory, "appsettings.Local.json");
     if (!File.Exists(localFile))
     {
         await File.WriteAllTextAsync(localFile, "{}", cancellationToken);
